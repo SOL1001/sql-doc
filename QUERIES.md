@@ -1,11 +1,11 @@
 # SQL Queries Reference
 
-This document contains all PostgreSQL queries used by the Go service.
+This document contains all PostgreSQL queries used by the odoo api for get end points.
 Each query is documented with its purpose, parameters, and the tables it touches.
 
-Database: ecommers
+<!-- Database: ecommers
 Host: localhost:2415
-User: odoo
+User: odoo -->
 
 ---
 

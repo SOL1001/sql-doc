@@ -339,7 +339,7 @@ export default function DocsPage() {
               </div>
             </nav>
 
-            <div className="rounded-2xl border border-zinc-200/70 bg-white p-4 shadow-sm">
+            {/* <div className="rounded-2xl border border-zinc-200/70 bg-white p-4 shadow-sm">
               <p className="text-[9.5px] font-bold uppercase tracking-widest text-zinc-400 mb-3">Database</p>
               <div className="space-y-2">
                 {[
@@ -353,7 +353,7 @@ export default function DocsPage() {
                   </div>
                 ))}
               </div>
-            </div>
+            </div> */}
           </aside>
 
           {/* ── Content ── */}
