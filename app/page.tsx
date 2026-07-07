@@ -253,15 +253,22 @@ const NAV: NavItem[] = [
 // Page
 // ---------------------------------------------------------------------------
 export default function DocsPage() {
+  // 1. Explicit override (any environment)
+  // 2. Bundled copy inside the project (production build — copied by prebuild script)
+  // 3. Relative sibling path (local monorepo dev)
   const mdPath =
     process.env.QUERIES_MD_PATH ??
-    path.resolve(process.cwd(), /*turbopackIgnore: true*/ "../../wishlist-service/QUERIES.md")
+    (() => {
+      const bundled = path.resolve(process.cwd(), "QUERIES.md")
+      if (require("fs").existsSync(bundled)) return bundled
+      return path.resolve(process.cwd(), /*turbopackIgnore: true*/ "../../wishlist-service/QUERIES.md")
+    })()
 
   let raw = ""
   try {
     raw = fs.readFileSync(mdPath, "utf-8")
   } catch {
-    raw = `# Error loading QUERIES.md\n\nFile not found at: \`${mdPath}\`\n\nSet \`QUERIES_MD_PATH\` env var to override.`
+    raw = `# Error loading QUERIES.md\n\nFile not found at: \`${mdPath}\`\n\nIn deployment, run \`npm run build\` from inside \`doc/sql-doc\` (the prebuild script copies QUERIES.md automatically). Or set the \`QUERIES_MD_PATH\` environment variable to the absolute path of QUERIES.md.`
   }
 
   const { html, copyMap } = mdToHtml(raw)
@@ -287,14 +294,14 @@ export default function DocsPage() {
       <header className="sticky top-0 z-40 border-b border-zinc-200/70 bg-white/90 backdrop-blur-xl shadow-sm">
         <div className="mx-auto flex max-w-screen-2xl items-center justify-between px-6 h-14">
           <div className="flex items-center gap-2">
-            <p className="font-bold text-[15px] tracking-tight text-zinc-900">Wishlist Service</p>
+            <p className="font-bold text-[15px] tracking-tight text-zinc-900">Documentation</p>
             <span className="text-zinc-300 mx-1">/</span>
             <p className="text-[13px] font-medium text-zinc-400">SQL Reference</p>
           </div>
-          <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200/60 text-[11px] font-semibold text-emerald-700">
+          {/* <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200/60 text-[11px] font-semibold text-emerald-700">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
             PostgreSQL · Odoo 17
-          </span>
+          </span> */}
         </div>
       </header>
 

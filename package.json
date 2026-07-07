@@ -4,6 +4,7 @@
   "type": "module",
   "private": true,
   "scripts": {
+    "prebuild": "node -e \"const fs=require('fs'),path=require('path');const src=path.resolve(__dirname,'../../wishlist-service/QUERIES.md');const dst=path.resolve(__dirname,'QUERIES.md');if(fs.existsSync(src)){fs.copyFileSync(src,dst);console.log('Copied QUERIES.md')}else{console.log('QUERIES.md not found at',src,'(skipped)')}\"",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
