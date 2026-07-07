@@ -7,7 +7,7 @@ const outfit = Outfit({ subsets: ["latin"], variable: "--font-sans" })
 const fontMono = Geist_Mono({ subsets: ["latin"], variable: "--font-mono" })
 
 export const metadata: Metadata = {
-  title: "Wishlist Service — SQL Query Reference",
+  title: "SQL Query Reference",
   description:
     "Complete PostgreSQL query reference for the CBE Super App Wishlist microservice (Go + Odoo 18).",
 }
