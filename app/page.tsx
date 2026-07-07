@@ -300,7 +300,7 @@ export default function DocsPage() {
           </div>
           {/* <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200/60 text-[11px] font-semibold text-emerald-700">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-            PostgreSQL · Odoo 17
+            PostgreSQL · Odoo 18
           </span> */}
         </div>
       </header>

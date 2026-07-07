@@ -214,10 +214,10 @@ Parameters:
   $5 — (page - 1) * per_page
 
 Notes:
-  - product_template.name is a JSONB column in Odoo 17. The ->>'en_US' operator
+  - product_template.name is a JSONB column in Odoo 18. The ->>'en_US' operator
     extracts the English string value.
   - loyalty_program.name is also JSONB, extracted the same way.
-  - uom_uom.name is JSONB in Odoo 17 (use ->>'en_US').
+  - uom_uom.name is JSONB in Odoo 18 (use ->>'en_US').
   - The product image URL is constructed in Go as:
     {BASE_URL}/api/v1/{merchant}/image/product.template/{product_id}
 
@@ -350,7 +350,7 @@ Parameters:
   $3 — offset
 
 Notes:
-  - res_country.name is JSONB in Odoo 17, extracted with ->>'en_US'.
+  - res_country.name is JSONB in Odoo 18, extracted with ->>'en_US'.
   - res_country_state.name is a plain varchar.
   - location is assembled in Go as: street, city, state (or "False" if null), country.
   - phone is formatted in Go: "+251" replaced with "0", spaces removed.
@@ -747,7 +747,7 @@ Parameters:
 
 ## JSONB Name Columns
 
-Several Odoo 17 tables store translatable string fields as JSONB rather than varchar.
+Several Odoo 18 tables store translatable string fields as JSONB rather than varchar.
 Always use `->>'en_US'` to extract the English string value. Tables affected:
 
 - `product_template.name`
