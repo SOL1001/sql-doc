@@ -9,7 +9,7 @@ const fontMono = Geist_Mono({ subsets: ["latin"], variable: "--font-mono" })
 export const metadata: Metadata = {
   title: "SQL Query Reference",
   description:
-    "Complete PostgreSQL query reference for the CBE Super App Wishlist microservice (Go + Odoo 18).",
+    "Complete PostgreSQL query reference for the CBE Super App E-commerce",
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
