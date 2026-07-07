@@ -1254,3 +1254,191 @@ Parameters:
 | delivery_order      | Delivery assignments. driver_assigned = res_partner.id        |
 | delivery_order_line | Items within a delivery order                                 |
 | res_users           | Driver users. token + token_expiration_time for x-token auth  |
+
+---
+
+## Endpoint 9 — GET /api/v1/product/purchase_status
+
+Checks whether a specific product has been purchased by a user in a confirmed superapp order.
+Returns a simple boolean — used by the mobile app to decide whether to show a "write a review" button.
+
+Auth: X-API-Key
+Query parameters: app_user_id (required), product_id (required)
+
+---
+
+### 9.1 Resolve partner
+
+Tables: res_partner
+
+```sql
+SELECT id
+FROM res_partner
+WHERE app_user_id = $1
+LIMIT 1;
+```
+
+Parameters:
+  $1 — app_user_id query parameter
+
+Error: 404 if no row found.
+
+---
+
+### 9.2 Check purchase existence
+
+Tables: sale_order_line, sale_order
+
+Counts matching order lines. A count > 0 means the product was bought.
+
+```sql
+SELECT COUNT(*)
+FROM sale_order_line sol
+JOIN sale_order so ON so.id = sol.order_id
+WHERE so.partner_id = $1
+  AND so.is_superapp_order = TRUE
+  AND so.state IN ('sale', 'done')
+  AND sol.product_id = $2;
+```
+
+Parameters:
+  $1 — partner ID from query 9.1
+  $2 — product_id query parameter (product.product variant ID)
+
+Response:
+  {"status": 200, "message": "Status retrieved successfully", "data": {"is_bought": true}}
+
+Notes:
+  - product_id refers to product.product (variant), not product.template.
+  - Only orders in state 'sale' or 'done' are considered (confirmed + delivered).
+  - Cancelled or draft orders do not count.
+
+---
+
+## Endpoint 10 — GET /api/v1/orders/list
+
+Returns merchants grouped by order count for a given user. Used to show the user
+a summary of which merchants they have ordered from and how many times.
+
+Auth: X-API-Key
+Query parameters: app_user_id (required), page, per_page (max 100)
+
+---
+
+### 10.1 Resolve partner
+
+Tables: res_partner
+
+```sql
+SELECT id
+FROM res_partner
+WHERE app_user_id = $1
+  AND active = TRUE
+LIMIT 1;
+```
+
+Parameters:
+  $1 — app_user_id query parameter
+
+Error: 404 if no row found.
+
+---
+
+### 10.2 Total distinct merchant count (for pagination)
+
+Tables: sale_order
+
+```sql
+SELECT COUNT(DISTINCT so.company_id)
+FROM sale_order so
+WHERE so.partner_id = $1
+  AND so.is_superapp_order = TRUE
+  AND so.company_id IS NOT NULL;
+```
+
+Parameters:
+  $1 — partner ID
+
+---
+
+### 10.3 Grouped orders by merchant
+
+Tables: sale_order, res_company
+
+Mirrors Odoo's read_group with groupby=['company_id'], orderby='__count desc, company_id asc'.
+
+```sql
+SELECT
+    rc.id                            AS company_id,
+    rc.name                          AS company_name,
+    rc.merchant                      AS merchant,
+    rc.logo_web IS NOT NULL          AS has_logo,
+    COUNT(so.id)                     AS order_count
+
+FROM sale_order so
+JOIN res_company rc ON rc.id = so.company_id
+WHERE so.partner_id = $1
+  AND so.is_superapp_order = TRUE
+GROUP BY rc.id, rc.name, rc.merchant, rc.logo_web
+ORDER BY order_count DESC, rc.name ASC
+LIMIT $2 OFFSET $3;
+```
+
+Parameters:
+  $1 — partner ID
+  $2 — per_page
+  $3 — (page - 1) * per_page
+
+Notes:
+  - Sorted by order_count DESC then name ASC, matching Odoo's read_group orderby.
+  - logo URL built in Go: {BASE_URL}/api/v1/merchant/logo/{company_id} when logo_web is set.
+
+---
+
+### 10.4 Item count per merchant (batched)
+
+Tables: sale_order_line, sale_order
+
+Counts total order line items per company, excluding cancelled orders.
+Fetched in one query for all companies on the current page.
+
+```sql
+SELECT so.company_id, COUNT(sol.id) AS item_count
+FROM sale_order_line sol
+JOIN sale_order so ON so.id = sol.order_id
+WHERE so.partner_id = $1
+  AND so.is_superapp_order = TRUE
+  AND so.superapp_order_status != 'cancelled'
+  AND so.company_id IN ($2, $3, ...)
+GROUP BY so.company_id;
+```
+
+Parameters:
+  $1 — partner ID
+  $2, $3, ... — company IDs from query 10.3 (one placeholder per company)
+
+Notes:
+  - Cancelled orders are excluded from item_count but included in order_count.
+    This matches Odoo's line_domain which filters superapp_order_status != 'cancelled'.
+  - item_count reflects the number of line items ordered, not the number of orders.
+
+Response shape per item:
+  {"name": "Kiosk super market", "merchant_id": "MRT00042R12", "logo": "...", "order_count": 5, "item_count": 8}
+
+---
+
+## Complete Route Summary
+
+| Method | Path                                      | Auth        | Handler                  |
+|--------|-------------------------------------------|-------------|--------------------------|
+| GET    | /api/v1/wishlist/{user_id}                | X-API-Key   | GetWishlist              |
+| GET    | /api/v1/orders                            | X-API-Key   | ListOrders               |
+| GET    | /api/v1/orders/list                       | X-API-Key   | ListOrderMerchants       |
+| GET    | /api/v1/{merchant}/orders/{order_id}/status | X-API-Key | GetOrderStatus           |
+| GET    | /api/v1/product/{product_id}/reviews      | X-API-Key   | GetProductReviews        |
+| GET    | /api/v1/product/purchase_status           | X-API-Key   | CheckPurchaseStatus      |
+| GET    | /api/v1/delivery_products                 | X-API-Key   | DeliveryProducts (list)  |
+| GET    | /api/v1/delivery_products/{prod_id}       | X-API-Key   | DeliveryProducts (single)|
+| GET    | /api/v1/driver/history                    | x-token     | HistoryOrder             |
+| GET    | /api/v1/driver/orders                     | x-token     | GetOrders                |
+| GET    | /api/v1/driver/order/{order_id}           | x-token     | GetOrderDetail           |
