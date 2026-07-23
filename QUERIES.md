@@ -1429,16 +1429,173 @@ Response shape per item:
 
 ## Complete Route Summary
 
-| Method | Path                                      | Auth        | Handler                  |
-|--------|-------------------------------------------|-------------|--------------------------|
-| GET    | /api/v1/wishlist/{user_id}                | X-API-Key   | GetWishlist              |
-| GET    | /api/v1/orders                            | X-API-Key   | ListOrders               |
-| GET    | /api/v1/orders/list                       | X-API-Key   | ListOrderMerchants       |
-| GET    | /api/v1/{merchant}/orders/{order_id}/status | X-API-Key | GetOrderStatus           |
-| GET    | /api/v1/product/{product_id}/reviews      | X-API-Key   | GetProductReviews        |
-| GET    | /api/v1/product/purchase_status           | X-API-Key   | CheckPurchaseStatus      |
-| GET    | /api/v1/delivery_products                 | X-API-Key   | DeliveryProducts (list)  |
-| GET    | /api/v1/delivery_products/{prod_id}       | X-API-Key   | DeliveryProducts (single)|
-| GET    | /api/v1/driver/history                    | x-token     | HistoryOrder             |
-| GET    | /api/v1/driver/orders                     | x-token     | GetOrders                |
-| GET    | /api/v1/driver/order/{order_id}           | x-token     | GetOrderDetail           |
+| Method | Path                                        | Auth        | Handler                  |
+|--------|---------------------------------------------|-------------|--------------------------|
+| GET    | /api/v1/wishlist/{user_id}                  | X-API-Key   | GetWishlist              |
+| GET    | /api/v1/orders                              | X-API-Key   | ListOrders               |
+| GET    | /api/v1/orders/list                         | X-API-Key   | ListOrderMerchants       |
+| GET    | /api/v1/orders/superapp                     | X-API-Key   | ListSuperappsOrders      |
+| GET    | /api/v1/{merchant}/orders/{order_id}/status | X-API-Key   | GetOrderStatus           |
+| GET    | /api/v1/product/{product_id}/reviews        | X-API-Key   | GetProductReviews        |
+| GET    | /api/v1/product/purchase_status             | X-API-Key   | CheckPurchaseStatus      |
+| GET    | /api/v1/delivery_products                   | X-API-Key   | DeliveryProducts (list)  |
+| GET    | /api/v1/delivery_products/{prod_id}         | X-API-Key   | DeliveryProducts (single)|
+| GET    | /api/v1/driver/history                      | x-token     | HistoryOrder             |
+| GET    | /api/v1/driver/orders                       | x-token     | GetOrders                |
+| GET    | /api/v1/driver/order/{order_id}             | x-token     | GetOrderDetail           |
+
+---
+
+
+## Endpoint 11 — GET /api/v1/orders/superapp
+
+Returns a paginated list of all sale orders where `is_superapp_order = TRUE`.
+Mirrors Odoo's `web_search_read` on `sale.order` with domain `[["is_superapp_order", "=", true]]`.
+
+Intended for admin/dashboard use — returns orders across all users and merchants.
+
+Auth: X-API-Key
+Query parameters: page, per_page (default 80, max 100), order, dir, merchant
+
+| Parameter | Type   | Default | Description                                                                   |
+|-----------|--------|---------|-------------------------------------------------------------------------------|
+| page      | int    | 1       | Page number                                                                   |
+| per_page  | int    | 80      | Results per page (max 100 — matches Odoo's default limit)                     |
+| order     | string | id      | Sort field: id, name, date_order, amount_total, state, superapp_order_status  |
+| dir       | string | desc    | Sort direction: asc or desc                                                   |
+| merchant  | string | —       | Filter by res_company.merchant slug (optional)                                |
+
+---
+
+### 11.1 Total count (no merchant filter)
+
+Tables: sale_order
+
+```sql
+SELECT COUNT(*)
+FROM sale_order so
+WHERE so.is_superapp_order = TRUE;
+```
+
+---
+
+### 11.2 Total count (with merchant filter)
+
+Tables: sale_order, res_company
+
+Only executed when the `merchant` query parameter is provided.
+
+```sql
+SELECT COUNT(*)
+FROM sale_order so
+LEFT JOIN res_company rc ON rc.id = so.company_id
+WHERE so.is_superapp_order = TRUE
+  AND rc.merchant = $1;
+```
+
+Parameters:
+  $1 — merchant slug from query parameter
+
+---
+
+### 11.3 Main orders query
+
+Tables: sale_order, res_currency, res_partner, res_users, crm_team, res_company
+
+`crm_team.name` is JSONB in Odoo 18 — extracted with `->>'en_US'`.
+`res_users` has no `name` column — name is fetched from the linked `res_partner`
+via a second join on `res_users.partner_id`.
+
+```sql
+SELECT
+    so.id,
+    so.name,
+    so.date_order,
+    so.commitment_date,
+    so.effective_date,
+    so.state,
+    so.superapp_order_status,
+    so."deliveryType",
+    ROUND(so.amount_total::numeric, 2)       AS amount_total,
+    ROUND(so.amount_untaxed::numeric, 2)     AS amount_untaxed,
+    ROUND(so.amount_tax::numeric, 2)         AS amount_tax,
+    so.invoice_status,
+    so.client_order_ref,
+    so.validity_date,
+    so.delivery_status,
+
+    cur.id                                   AS currency_id,
+
+    rp.id                                    AS partner_id,
+    rp.name                                  AS partner_name,
+
+    ru.id                                    AS user_id,
+    rup.name                                 AS user_name,
+
+    ct.id                                    AS team_id,
+    ct.name->>'en_US'                        AS team_name,
+
+    rc.id                                    AS company_id,
+    rc.name                                  AS company_name,
+    rc.merchant                              AS company_merchant
+
+FROM sale_order so
+LEFT JOIN res_currency  cur ON cur.id  = so.currency_id
+LEFT JOIN res_partner   rp  ON rp.id   = so.partner_id
+LEFT JOIN res_users     ru  ON ru.id   = so.user_id
+LEFT JOIN res_partner   rup ON rup.id  = ru.partner_id    -- user display name
+LEFT JOIN crm_team      ct  ON ct.id   = so.team_id
+LEFT JOIN res_company   rc  ON rc.id   = so.company_id
+WHERE so.is_superapp_order = TRUE
+  -- AND rc.merchant = $1  (added when merchant filter is provided)
+ORDER BY so.id DESC           -- replaced by validated order/dir params
+LIMIT $1 OFFSET $2;
+-- When merchant filter active: LIMIT $2 OFFSET $3
+```
+
+Parameters (no merchant filter):
+  $1 — per_page
+  $2 — (page - 1) * per_page
+
+Parameters (with merchant filter):
+  $1 — merchant slug
+  $2 — per_page
+  $3 — (page - 1) * per_page
+
+Notes:
+  - `order` param maps to an allowlist: id → so.id, name → so.name,
+    date_order → so.date_order, amount_total → so.amount_total,
+    state → so.state, superapp_order_status → so.superapp_order_status.
+    Any unrecognised value falls back to `so.id DESC`.
+  - `commitment_date`, `effective_date`, `client_order_ref` serialize as JSON
+    `false` (not `null`) when unset — matching Odoo's web_search_read behaviour.
+  - `date_order` formatted as `"2026-07-14 09:37:23"` (space separator, UTC, no
+    timezone suffix) — matching Odoo's JSON output exactly.
+  - `crm_team.name` is JSONB — `->>'en_US'` required to get the plain string.
+  - `company_id` includes `merchant` field (res_company.merchant slug), null when unset.
+
+Response shape per item:
+```json
+{
+  "id": 353,
+  "name": "SOKI1000184",
+  "date_order": "2026-07-14 09:37:23",
+  "commitment_date": false,
+  "effective_date": false,
+  "state": "draft",
+  "superapp_order_status": "ordered",
+  "delivery_status": "pending",
+  "delivery_type": "self_pickup",
+  "amount_total": 1.15,
+  "amount_untaxed": 1.0,
+  "amount_tax": 0.15,
+  "invoice_status": "no",
+  "client_order_ref": false,
+  "validity_date": "2026-08-13",
+  "currency_id": { "id": 78 },
+  "partner_id":  { "id": 207, "display_name": "User_50cc19f5f0ae6c31e063066e030a4040" },
+  "user_id":     { "id": 1,   "display_name": "eCommerceBot" },
+  "team_id":     { "id": 1,   "display_name": "Sales" },
+  "company_id":  { "id": 11,  "display_name": "Kiosk Merchant", "merchant": "MRT000010SPR" }
+}
+```
