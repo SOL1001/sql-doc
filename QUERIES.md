@@ -310,7 +310,7 @@ SELECT
     so.superapp_order_status,
     so.date_order,
     ROUND(so.amount_total::numeric, 2)             AS total_price,
-    so."deliveryType",
+    so.delivery_status,
     so.driver_name,
     so.driver_mobile,
     so.driver_delivery_medium,
