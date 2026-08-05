@@ -311,8 +311,6 @@ SELECT
     so.date_order,
     ROUND(so.amount_total::numeric, 2)             AS total_price,
     so."deliveryType",
-    so.cancel_reason,
-    so.cancel_reason,
     so.driver_name,
     so.driver_mobile,
     so.driver_delivery_medium,
