@@ -2601,16 +2601,808 @@ CROSS JOIN product_count pcnt;
 
 
 
-----------------------------------
-------- product detail
-
-----
 ```
 
 
 ## Endpoint 28 — GET /api/v1/product/{product_tmpl_id:int}
 
 ```sql
-;
+WITH recursive params AS (
+    SELECT
+        'http://localhost:8062'::text AS base_url,
+        13::int AS product_tmpl_id
+),
+allowed_parent_companies AS (
+    SELECT id, parent_id
+    FROM res_company
+    WHERE parent_id IS NULL
+        AND cps_enabled = true
+        AND COALESCE(is_delivery,false)=false
+        AND active=true
+        AND merchant IS NOT NULL
+        AND merchant!=''
+),
+
+allowed_companies AS (
+    SELECT id, parent_id, 1 AS depth
+    FROM allowed_parent_companies
+
+    UNION ALL
+
+    SELECT c.id, c.parent_id, ac.depth + 1
+    FROM res_company c
+    JOIN allowed_companies ac ON c.parent_id = ac.id
+    WHERE ac.depth < 10 
+        AND c.cps_enabled = true
+        AND c.active = true
+        AND COALESCE(c.is_delivery, false) = false
+        AND c.merchant IS NOT NULL
+        AND c.merchant != ''
+),
+product AS (
+    SELECT
+        pt.id,
+        pt.name,
+        pt.description_sale,
+        pt.ecommerce_float_price,
+        c.currency_id AS cost_currency_id, 
+        pt.uom_id,
+        pt.company_id,
+        pt.t_is_featured,
+        pt.is_halal,
+        pt.is_arrival,
+        pt.min_quantity,
+        pt.max_quantity,
+        pt.ecomerce_category_id,
+        c.id AS company_id_joined,
+        c.merchant,
+        c.name AS merchant_name,
+        c.logo_web,
+        c.lat_location,
+        c.lng_location,
+        rp.city,
+        st.name AS state_name
+    FROM product_template pt
+    JOIN res_company c
+        ON c.id=pt.company_id
+    LEFT JOIN res_partner rp
+        ON rp.id=c.partner_id
+    LEFT JOIN res_country_state st
+        ON st.id=rp.state_id
+    CROSS JOIN params p
+    WHERE pt.id=p.product_tmpl_id
+        AND pt.active=true
+        AND pt.is_for_ecommerce=true
+        AND pt.x_superapp_approval_status='approved'
+        AND pt.company_id IN (
+            SELECT id FROM allowed_companies
+        )
+),
+active_product_discounts AS (
+    SELECT
+        pd.*
+    FROM product_discount pd
+    WHERE pd.is_active=true
+        AND pd.x_superapp_approval_status='approved'
+        AND (
+            pd.start_date IS NULL
+            OR pd.start_date<=CURRENT_DATE
+        )
+        AND (
+            pd.end_date IS NULL
+            OR pd.end_date>=CURRENT_DATE
+        )
+),
+discount_data AS (
+    SELECT
+        pd.product_tmpl_id,
+        jsonb_agg(
+            jsonb_build_object(
+                'name',
+                pd.name,   
+                'discount_type',
+                INITCAP(pd.discount_type),
+                'discount_value',
+                pd.discount_value::text,
+                'start_date',
+                CASE
+                    WHEN pd.start_date IS NOT NULL
+                    THEN TO_CHAR(pd.start_date,'DD/MM/YY')
+                    ELSE NULL
+                END,
+                'end_date',
+                CASE
+                    WHEN pd.end_date IS NOT NULL
+                    THEN TO_CHAR(pd.end_date,'DD/MM/YY')
+                    ELSE NULL
+                END
+            )
+            ORDER BY pd.id
+        ) AS discount,
+        COALESCE(
+            (SELECT SUM(
+                CASE
+                    WHEN pd2.discount_type='percentage'
+                    THEN ROUND(
+                        (
+                            pt2.ecommerce_float_price -
+                            (
+                                pt2.ecommerce_float_price *
+                                pd2.discount_value /
+                                100
+                            )
+                        )::numeric,
+                        2
+                    )
+                    ELSE ROUND(
+                        (
+                            pt2.ecommerce_float_price -
+                            pd2.discount_value
+                        )::numeric,
+                        2
+                    )
+                END
+            )
+            FROM active_product_discounts pd2
+            JOIN product_template pt2
+                ON pt2.id=pd2.product_tmpl_id
+            WHERE pd2.product_tmpl_id=pd.product_tmpl_id
+            ), 0
+        ) AS product_discounts
+    FROM active_product_discounts pd
+    GROUP BY pd.product_tmpl_id
+),
+
+active_loyalty_program AS (
+    SELECT DISTINCT ON (lp.company_id)
+        lp.id,
+        lp.name,
+        lp.date_from,
+        lp.date_to,
+        lp.company_id AS loyalty_company_id
+    FROM loyalty_program lp
+    JOIN allowed_companies ac ON ac.id = lp.company_id
+    WHERE lp.program_type IN ('promotion')
+        AND lp.is_ecommerce = true
+        AND lp.x_superapp_approval_status = 'approved'
+        AND (lp.date_from IS NULL OR lp.date_from <= CURRENT_DATE)
+        AND (lp.date_to IS NULL OR lp.date_to >= CURRENT_DATE)
+    ORDER BY lp.company_id, lp.sequence ASC, lp.id
+),
+loyalty_discount_data AS (
+    SELECT
+        pt_all.id AS product_tmpl_id,
+        jsonb_agg(
+            jsonb_build_object(
+                'name',
+                lp.name ->> 'en_US', 
+                'discount_type',
+                CASE
+                    WHEN lr.discount_mode='percent'
+                    THEN 'Percentage'
+                    ELSE INITCAP(lr.discount_mode)
+                END,
+                'discount_value',
+                lr.discount::text,
+                'start_date',
+                CASE
+                    WHEN lp.date_from IS NOT NULL
+                    THEN TO_CHAR(lp.date_from,'DD/MM/YY')
+                    ELSE NULL
+                END,
+                'end_date',
+                CASE
+                    WHEN lp.date_to IS NOT NULL
+                    THEN TO_CHAR(lp.date_to,'DD/MM/YY')
+                    ELSE NULL
+                END
+            )
+        ) AS discount,
+        SUM(
+            CASE
+                WHEN lr.discount_mode='percent'
+                THEN ROUND(
+                    GREATEST(
+                        pt_all.ecommerce_float_price -
+                        (
+                            pt_all.ecommerce_float_price *
+                            lr.discount /
+                            100
+                        ),
+                        0
+                    )::numeric,
+                    2
+                )
+                ELSE ROUND(
+                    GREATEST(
+                        pt_all.ecommerce_float_price -
+                        lr.discount,
+                        0
+                    )::numeric,
+                    2
+                )
+            END
+        ) AS product_discounts
+    FROM product_template pt_all
+    JOIN active_loyalty_program lp ON lp.loyalty_company_id=pt_all.company_id
+    JOIN loyalty_reward lr ON lr.program_id=lp.id
+    WHERE pt_all.active=true
+        AND pt_all.is_for_ecommerce=true
+        AND pt_all.x_superapp_approval_status='approved'
+    GROUP BY pt_all.id
+),
+final_discounts AS (
+    SELECT
+        p.id AS product_tmpl_id,
+        CASE
+            WHEN dd.discount IS NOT NULL AND jsonb_array_length(COALESCE(dd.discount, '[]'::jsonb)) > 0
+            THEN dd.discount
+            ELSE COALESCE(ld.discount,'[]'::jsonb)
+        END AS discount,
+        CASE
+            WHEN dd.discount IS NOT NULL AND jsonb_array_length(COALESCE(dd.discount, '[]'::jsonb)) > 0
+            THEN dd.product_discounts
+            ELSE COALESCE(ld.product_discounts,0)
+        END AS product_discounts
+    FROM product p
+    LEFT JOIN discount_data dd
+        ON dd.product_tmpl_id=p.id
+    LEFT JOIN loyalty_discount_data ld
+        ON ld.product_tmpl_id=p.id
+)
+,review_data AS (
+    SELECT
+        pr.product_template,
+        COUNT(*)::int AS total_reviews,
+        ROUND(
+            AVG(pr.rating::numeric),
+            2
+        ) AS average_rating
+    FROM product_review pr
+    GROUP BY pr.product_template
+),
+variant_stock AS (
+    SELECT
+        pp.id AS product_id,
+        SUM(sq.quantity) AS qty_available,
+        SUM(sq.quantity - COALESCE(sq.reserved_quantity, 0)) AS virtual_available
+    FROM product_product pp
+	JOIN product_template pt ON pt.id = pp.product_tmpl_id
+    JOIN stock_quant sq ON sq.product_id=pp.id
+    JOIN stock_location sl
+        ON sl.id=sq.location_id
+        AND sl.usage='internal'
+        AND sl.company_id = pt.company_id
+    GROUP BY pp.id
+),
+color_attribute_values AS (
+    SELECT DISTINCT
+        pt.id AS product_tmpl_id,
+        pa.id AS attribute_id,
+        pa.name ->> 'en_US' AS attribute_name,
+        jsonb_build_object(
+            'id',
+            pav.id,
+            'name',
+            pav.name ->> 'en_US'
+        ) AS value_json
+    FROM product_template pt
+    JOIN product_template_attribute_line pal
+        ON pal.product_tmpl_id=pt.id
+    JOIN product_attribute pa
+        ON pa.id=pal.attribute_id
+    JOIN product_attribute_value_product_template_attribute_line_rel palvr
+        ON palvr.product_template_attribute_line_id=pal.id
+    JOIN product_attribute_value pav
+        ON pav.id=palvr.product_attribute_value_id
+    WHERE pa.display_type='color'
+),
+non_color_attribute_values AS (
+    SELECT DISTINCT
+        pt.id AS product_tmpl_id,
+        pa.id AS attribute_id,
+        pa.name ->> 'en_US' AS attribute_name,
+        jsonb_build_object(
+            'id',
+            pav.id,
+            'name',
+            pav.name ->> 'en_US'
+        ) AS value_json
+    FROM product_template pt
+    JOIN product_template_attribute_line pal
+        ON pal.product_tmpl_id=pt.id
+    JOIN product_attribute pa
+        ON pa.id=pal.attribute_id
+    JOIN product_attribute_value_product_template_attribute_line_rel palvr
+        ON palvr.product_template_attribute_line_id=pal.id
+    JOIN product_attribute_value pav
+        ON pav.id=palvr.product_attribute_value_id
+    WHERE pa.display_type!='color'
+),
+template_attributes AS (
+    SELECT
+        x.product_tmpl_id,
+        x.attribute_id,
+        x.attribute_name,
+        jsonb_agg(
+            x.value_json
+            ORDER BY
+            (x.value_json->>'id')::int
+        ) AS values_json
+    FROM (
+        SELECT
+            product_tmpl_id,
+            attribute_id,
+            attribute_name,
+            value_json
+        FROM color_attribute_values
+        UNION ALL
+        SELECT
+            product_tmpl_id,
+            attribute_id,
+            attribute_name,
+            value_json
+        FROM non_color_attribute_values
+    ) x
+    GROUP BY
+        x.product_tmpl_id,
+        x.attribute_id,
+        x.attribute_name
+),
+variant_type_data AS (
+    SELECT
+        product_tmpl_id,
+        jsonb_agg(
+            jsonb_build_object(
+                'id',
+                attribute_id,
+                'attribute',
+                attribute_name,
+                'values',
+                values_json
+            )
+            ORDER BY attribute_id
+        ) AS variant_type
+    FROM template_attributes
+    GROUP BY product_tmpl_id
+),
+variant_attributes AS (
+    SELECT
+        pp.id AS product_id,
+        jsonb_agg(
+            jsonb_build_object(
+                'id',
+                pa.id,
+                'attribute',
+                pa.name ->> 'en_US',
+                'value_id',
+                pav.id,
+                'value',
+                pav.name ->> 'en_US'
+            )
+            ORDER BY pa.id
+        ) AS attributes
+    FROM product_product pp
+    JOIN product_variant_combination pvc
+        ON pvc.product_product_id = pp.id
+    JOIN product_template_attribute_value ptav
+        ON ptav.id = pvc.product_template_attribute_value_id
+    JOIN product_attribute_value pav
+        ON pav.id = ptav.product_attribute_value_id
+    JOIN product_attribute pa
+        ON pa.id = pav.attribute_id
+    GROUP BY pp.id
+),
+variant_discounts AS (
+    SELECT
+        pp.id AS product_id,
+        fd.discount,
+        fd.product_discounts
+    FROM product_product pp
+    JOIN final_discounts fd
+        ON fd.product_tmpl_id=pp.product_tmpl_id
+),
+template_stock AS (
+    SELECT
+        pp.product_tmpl_id,
+        SUM(sq.quantity) AS qty_available,
+        SUM(sq.quantity - COALESCE(sq.reserved_quantity, 0)) AS virtual_available
+    FROM product_product pp
+	JOIN product_template pt ON pt.id = pp.product_tmpl_id
+    JOIN stock_quant sq ON sq.product_id=pp.id
+    JOIN stock_location sl
+        ON sl.id=sq.location_id
+        AND sl.usage='internal'
+        AND sl.company_id = pt.company_id
+    GROUP BY pp.product_tmpl_id
+),
+template_images AS (
+    SELECT
+        ia.res_id AS product_tmpl_id,
+        jsonb_agg(
+            jsonb_build_object(
+                'field',
+                ia.res_field,
+                'url',
+                ((SELECT base_url FROM params) || '/api/v1/image/' || ia.res_model || '/' || ia.res_id || '?field=' || ia.res_field)::text
+            ) ORDER BY ia.id
+        ) AS images
+    FROM ir_attachment ia
+    WHERE ia.res_model='product.template'
+        AND ia.res_field IN ('image_1','image_2','image_3','image_4','image_5','image_6')
+    GROUP BY ia.res_id
+),
+product_video_urls AS (
+    SELECT
+        pv.product_tmpl_id,
+        pt.company_id,
+        jsonb_agg(
+            jsonb_build_object(
+                'video_url',
+                pv.url,
+                'thumbnail_url',
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM ir_attachment ia
+                        WHERE ia.res_model='product.video.url'
+                            AND ia.res_id=pv.id
+                            AND ia.res_field='video_thumbnail'
+                    )
+                    THEN (SELECT base_url FROM params) || '/api/v1/' || COALESCE((SELECT merchant FROM res_company WHERE id=pt.company_id LIMIT 1), 'merchant') || '/image/product.video.url/' || pv.id
+                    ELSE NULL
+                END
+            ) ORDER BY pv.id
+        ) AS videos
+    FROM product_video_url pv
+    JOIN product_template pt ON pt.id = pv.product_tmpl_id
+    WHERE pv.url ILIKE '%m3u8%'
+    GROUP BY pv.product_tmpl_id, pt.company_id
+),
+template_delivery_types AS (
+    SELECT
+        dtptr.product_template_id,
+        jsonb_agg(dt.name ORDER BY dt.id) AS delivery_types,
+        jsonb_agg(
+            jsonb_build_object(
+                'name', dt.name,
+                'level', COALESCE(dt.priority_level, 0),
+                'icon', CASE
+                    WHEN EXISTS (SELECT 1 FROM ir_attachment ia
+                        WHERE ia.res_model='delivery.type'
+                          AND ia.res_id=dt.id
+                          AND ia.res_field='icon')
+                    THEN (SELECT base_url FROM params) || '/api/v1/image/delivery.type/' || dt.id || '/icon'
+                    ELSE NULL
+                END
+            ) ORDER BY dt.id
+        ) AS delivery_object
+    FROM delivery_type_product_template_rel dtptr
+    JOIN delivery_type dt ON dt.id = dtptr.delivery_type_id
+    GROUP BY dtptr.product_template_id
+),
+product_specifications AS (
+    SELECT
+        ep.product_id AS product_tmpl_id,
+        jsonb_agg(
+            jsonb_build_object(
+                'id',
+                ep.id,
+                'spec',
+                es.name,
+                'value',
+                ep.value,
+                'icon', NULL 
+            ) ORDER BY ep.id
+        ) AS specifications
+    FROM ecomerce_product ep
+    JOIN ecomerce_specs es ON es.id=ep.spec
+    GROUP BY ep.product_id
+),
+variants AS (
+    SELECT
+        pp.product_tmpl_id,
+        COUNT(*)::int AS total_variants,
+        jsonb_agg(
+            jsonb_build_object(
+                'id',
+                pp.id,
+                'name',
+                COALESCE(pt.name ->> 'en_US', ''),
+                'product_category',
+                COALESCE(
+                    (SELECT pec_var.name FROM product_ecomerce_categories pec_var
+                     WHERE pec_var.id = pt.ecomerce_category_id),
+                    'General'
+                ),
+                'specifications',
+                COALESCE(
+                    (SELECT jsonb_agg(jsonb_build_object(
+                        'id', ep.id,
+                        'spec', es.name,
+                        'value', ep.value,
+                        'icon', (SELECT base_url FROM params) || '/api/v1/' || rc.merchant || '/image/ecomerce.product/' || ep.id || '/icon'
+                     ) ORDER BY ep.id)
+                     FROM ecomerce_product ep
+                     JOIN ecomerce_specs es ON es.id = ep.spec
+                     WHERE ep.product_id = pt.id),
+                    '[]'::jsonb
+                ),
+                'delivery_types',
+                COALESCE(
+                    (SELECT jsonb_agg(dt.name ORDER BY dt.id)
+                     FROM delivery_type_product_template_rel dtptr
+                     JOIN delivery_type dt ON dt.id = dtptr.delivery_type_id
+                     WHERE dtptr.product_template_id = pt.id),
+                    '[]'::jsonb
+                ),
+                'delivery_object',
+                COALESCE(
+                    (SELECT jsonb_agg(jsonb_build_object(
+                        'name', dt.name,
+                        'level', COALESCE(dt.priority_level, 0),
+                        -- FIX #5: Include actual delivery icon URL
+                        'icon', CASE
+                            WHEN EXISTS (SELECT 1 FROM ir_attachment ia
+                                WHERE ia.res_model='delivery.type'
+                                  AND ia.res_id=dt.id
+                                  AND ia.res_field='icon')
+                            THEN (SELECT base_url FROM params) || '/api/v1/image/delivery.type/' || dt.id || '/icon'
+                            ELSE NULL
+                        END
+                     ) ORDER BY dt.id)
+                     FROM delivery_type_product_template_rel dtptr
+                     JOIN delivery_type dt ON dt.id = dtptr.delivery_type_id
+                     WHERE dtptr.product_template_id = pt.id),
+                    '[]'::jsonb
+                ),
+                'product_description',
+                COALESCE(pt.description_sale ->> 'en_US', ''),
+                'cost_currency',
+                CASE
+                    WHEN rc.currency_id IS NOT NULL
+                    THEN jsonb_build_object(
+                        'id', rc.currency_id,
+                        'name', (SELECT name FROM res_currency WHERE id = rc.currency_id LIMIT 1)
+                    )
+                    ELSE jsonb_build_object('id', NULL, 'name', NULL)
+                END,
+                'list_price',
+                pp.ecommerce_float_price,
+                'UoM',
+                CASE
+                    WHEN pt.uom_id IS NOT NULL
+                    THEN jsonb_build_object(
+                        'id', pt.uom_id,
+                        'name', (SELECT name ->> 'en_US' FROM uom_uom WHERE id = pt.uom_id LIMIT 1)
+                    )
+                    ELSE jsonb_build_object('id', NULL, 'name', NULL)
+                END,
+                'product_image',
+                CASE
+                    WHEN EXISTS (SELECT 1 FROM ir_attachment WHERE res_model='product.product' AND res_id=pp.id AND res_field='image_1920')
+                    THEN (SELECT base_url FROM params) || '/api/v1/' || rc.merchant || '/image/product.product/' || pp.id
+                    WHEN EXISTS (SELECT 1 FROM ir_attachment WHERE res_model='product.template' AND res_id=pt.id AND res_field='image_1920')
+                    THEN (SELECT base_url FROM params) || '/api/v1/' || rc.merchant || '/image/product.template/' || pt.id
+                    ELSE NULL
+                END,
+                'product_images',
+                COALESCE(
+                    (SELECT jsonb_agg(
+                        jsonb_build_object(
+                            'field', f.fld,
+                            'url',
+                            CASE
+                                WHEN iav.id IS NOT NULL
+                                THEN (SELECT base_url FROM params) || '/api/v1/' || rc.merchant || '/image/product.product/' || pp.id || '?field=' || f.fld
+                                ELSE (SELECT base_url FROM params) || '/api/v1/' || rc.merchant || '/image/product.template/' || pt.id || '?field=' || f.fld
+                            END
+                        )
+                        ORDER BY f.fld
+                    )
+                     FROM unnest(ARRAY['image_1','image_2','image_3','image_4','image_5','image_6']) AS f(fld)
+                     LEFT JOIN ir_attachment iav
+                        ON iav.res_model='product.product' AND iav.res_id=pp.id AND iav.res_field=f.fld
+                     LEFT JOIN ir_attachment iat
+                        ON iat.res_model='product.template' AND iat.res_id=pt.id AND iat.res_field=f.fld
+                     WHERE iav.id IS NOT NULL OR iat.id IS NOT NULL),
+                    '[]'::jsonb
+                ),
+                'qty_available',
+                COALESCE(vs.qty_available, 0),
+                'virtual_available',
+                COALESCE(vs.virtual_available, 0),
+                'variants_types',
+                COALESCE(va.attributes, '[]'::jsonb),
+                'is_featured',
+                COALESCE(pp.v_is_featured, false),
+                'discount',
+                COALESCE(vd.discount, '[]'::jsonb),
+                'product_discounts',
+                COALESCE(vd.product_discounts, 0)
+            )
+            ORDER BY pp.id
+        ) FILTER (WHERE pp.id IS NOT NULL) AS variants
+    FROM product_product pp
+    JOIN product_template pt
+        ON pt.id = pp.product_tmpl_id
+    JOIN res_company rc
+        ON rc.id = pt.company_id
+    LEFT JOIN product_ecomerce_categories pec
+        ON pec.id = pt.ecomerce_category_id
+    LEFT JOIN variant_stock vs
+        ON vs.product_id = pp.id
+    LEFT JOIN variant_attributes va
+        ON va.product_id = pp.id
+    LEFT JOIN variant_discounts vd
+        ON vd.product_id = pp.id
+    WHERE pp.active = true
+        AND pt.x_superapp_approval_status = 'approved'
+    GROUP BY pp.product_tmpl_id
+)
+,product_final AS (
+    SELECT
+        p.id,
+        p.name,
+        p.description_sale,
+        p.ecommerce_float_price,
+        p.cost_currency_id,
+        p.uom_id,
+        p.company_id,
+        p.merchant,
+        p.merchant_name,
+        p.logo_web,
+        p.lat_location,
+        p.lng_location,
+        p.city,
+        p.state_name,
+        p.t_is_featured,
+        p.is_halal,
+        p.is_arrival,
+        p.min_quantity,
+        p.max_quantity,
+        p.ecomerce_category_id,
+        COALESCE(ts.qty_available,0) AS qty_available,
+        COALESCE(ts.virtual_available,0) AS virtual_available,
+        COALESCE(fd.discount,'[]'::jsonb) AS discount,
+        COALESCE(fd.product_discounts,0) AS product_discounts,
+        COALESCE(rs.total_reviews,0) AS total_reviews,
+        COALESCE(rs.average_rating,0) AS average_rating,
+        COALESCE(v.total_variants,0) AS total_variants,
+        COALESCE(v.variants,'[]'::jsonb) AS variants,
+        COALESCE(vtd.variant_type,'[]'::jsonb) AS variant_type,
+        COALESCE(ti.images,'[]'::jsonb) AS template_images
+    FROM product p
+    LEFT JOIN template_stock ts
+        ON ts.product_tmpl_id=p.id
+    LEFT JOIN final_discounts fd
+        ON fd.product_tmpl_id=p.id
+    LEFT JOIN review_data rs
+        ON rs.product_template=p.id
+    LEFT JOIN variants v
+        ON v.product_tmpl_id=p.id
+    LEFT JOIN variant_type_data vtd
+        ON vtd.product_tmpl_id=p.id
+    LEFT JOIN template_images ti
+        ON ti.product_tmpl_id=p.id
+)
+SELECT
+    pf.id,
+    pf.name ->> 'en_US' AS name,
+    CASE
+        WHEN cat.id IS NOT NULL
+        THEN jsonb_build_object(
+            'id', cat.id,
+            'name', cat.name
+        )
+        ELSE NULL
+    END AS product_category,
+    COALESCE(
+        pf.description_sale ->> 'en_US',
+        ''
+    ) AS product_description,
+    CASE
+        WHEN EXISTS (
+            SELECT 1 FROM ir_attachment ia
+            WHERE ia.res_model='product.template'
+                AND ia.res_id=pf.id
+                AND ia.res_field='image_1920'
+        )
+        THEN r.base_url || '/api/v1/' || pf.merchant || '/image/product.template/' || pf.id
+        ELSE NULL
+    END AS product_image,
+    COALESCE(
+        pv.videos,
+        '[]'::jsonb
+    ) AS video_urls,
+    pf.template_images AS product_images,
+    CASE
+        WHEN pf.cost_currency_id IS NOT NULL
+        THEN jsonb_build_array(
+            jsonb_build_object(
+                'id',
+                pf.cost_currency_id,
+                'name',
+                (SELECT name FROM res_currency WHERE id=pf.cost_currency_id LIMIT 1)
+            )
+        )
+        ELSE '[]'::jsonb
+    END AS cost_currency,
+    ROUND(
+        pf.ecommerce_float_price::numeric,
+        2
+    ) AS list_price,
+    pf.qty_available,
+    pf.virtual_available,
+    pf.discount,
+    pf.product_discounts,
+    CASE
+        WHEN u.id IS NOT NULL
+        THEN jsonb_build_object(
+            'id',
+            u.id,
+            'name',
+            u.name ->> 'en_US'
+        )
+        ELSE NULL
+    END AS "UoM",
+    COALESCE(
+        pf.t_is_featured,
+        false
+    ) AS is_featured,
+    COALESCE(
+        pf.variant_type,
+        '[]'::jsonb
+    ) AS variants_types,
+    pf.total_variants,
+    pf.variants,
+    COALESCE(pf.is_halal, false) AS is_halal,
+    COALESCE(pf.is_arrival, false) AS is_arrival,
+    COALESCE(
+        ps.specifications,
+        '[]'::jsonb
+    ) AS specifications,
+    COALESCE(tdt.delivery_types, '[]'::jsonb) AS delivery_types,
+    COALESCE(tdt.delivery_object, '[]'::jsonb) AS delivery_object,
+    jsonb_build_object(
+        'merchant',
+        pf.merchant,
+        'name',
+        pf.merchant_name,
+        'logo',
+        CASE
+            WHEN pf.logo_web IS NOT NULL
+            THEN
+                r.base_url ||
+                '/api/v1/merchant/logo/' ||
+                pf.company_id
+            ELSE NULL
+        END,
+        'lat_location',
+        pf.lat_location,
+        'lng_location',
+        pf.lng_location,
+        'city',
+        pf.city,
+        'state',
+        pf.state_name
+    ) AS merchant_info,
+    pf.min_quantity,
+    pf.max_quantity,
+    pf.average_rating,
+    pf.total_reviews
+FROM product_final pf
+CROSS JOIN params r
+LEFT JOIN product_ecomerce_categories cat
+    ON cat.id=pf.ecomerce_category_id
+LEFT JOIN product_video_urls pv
+    ON pv.product_tmpl_id=pf.id
+LEFT JOIN template_delivery_types tdt
+    ON tdt.product_template_id=pf.id
+LEFT JOIN product_specifications ps
+    ON ps.product_tmpl_id=pf.id
+LEFT JOIN uom_uom u
+    ON u.id=pf.uom_id
+WHERE pf.id=(SELECT product_tmpl_id FROM params)
+LIMIT 1;
 ```
 
