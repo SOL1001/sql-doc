@@ -278,42 +278,7 @@ SELECT
 
 
 
-## Endpoint 4 — GET /api/v1/driver/history
-
-Returns a list of delivered orders assigned to a driver.
-Fixed to correctly map the `pickup_from` details to the merchant's data (`dord.partner_id`) instead of the customer's data.
-
-Tables: res_users, delivery_order, res_partner, sale_order
-
-```sql
--- Step 1: Validate x-token
-SELECT ru.id, ru.partner_id, ru.token_expiration_time
-FROM res_users ru
-WHERE ru.token = $1 AND ru.active = TRUE
-LIMIT 1;
-
--- Step 2: Fetch history (updated to correctly use merchant details)
-SELECT
-    dord.id,
-    dord.name                                   AS order_name,
-    -- merchant name (pickup_from.name in Odoo response)
-    COALESCE(merch.name, '')                    AS merchant_name,
-    -- merchant street (pickup_from.branch in Odoo response)
-    COALESCE(merch.street, '')                  AS merchant_street,
-    dord.delivery_date,
-    -- sale order status via so_id join
-    so.superapp_order_status
-FROM delivery_order dord
-LEFT JOIN res_partner merch ON merch.id = dord.partner_id
-LEFT JOIN sale_order so     ON so.id    = dord.so_id
-WHERE dord.driver_assigned = $1
-  AND dord.state = 'delivered'
-ORDER BY dord.id DESC;
-```
-
-
-
-## Endpoint 5 — GET /api/v1/product/purchase_status
+## Endpoint 4 — GET /api/v1/product/purchase_status
 
 Checks if an app user has previously purchased a specific product. 
 Optimized into a single query using EXISTS.
@@ -339,7 +304,7 @@ SELECT
 
 
 
-## Endpoint 6 — GET /api/v1/orders/list
+## Endpoint 5 — GET /api/v1/orders/list
 
 Returns a paginated list of merchants that the user has ordered from, including the total number of orders and items per merchant.
 Optimized into a single CTE + LATERAL query.
@@ -402,7 +367,7 @@ SELECT
 
 
 
-## Endpoint 7 — GET /api/v1/categoryads
+## Endpoint 6 — GET /api/v1/categoryads
 
 ```sql
 SELECT 
@@ -418,7 +383,7 @@ LIMIT %s;
 ```
 
 
-## Endpoint 8 — GET /api/v1/populars
+## Endpoint 7 — GET /api/v1/populars
 
 ```sql
 SELECT 
@@ -438,7 +403,7 @@ WHERE c.parent_id IS NULL
 ```
 
 
-## Endpoint 9 — GET /api/v1/popular_categories
+## Endpoint 8 — GET /api/v1/popular_categories
 
 ```sql
 SELECT
@@ -461,7 +426,7 @@ OFFSET %S
 LIMIT %S;
 ```
 
-## Endpoint 10 — GET /api/v1/popular_categories/{merchant_id:string}
+## Endpoint 9 — GET /api/v1/popular_categories/{merchant_id:string}
 
 ```sql
 WITH merchant_company AS (
@@ -515,7 +480,7 @@ ORDER BY
 ```
 
 
-## Endpoint 11 — GET /api/v1/popular_products
+## Endpoint 10 — GET /api/v1/popular_products
 
 ```sql
 SELECT 
@@ -629,7 +594,7 @@ WHERE
 	OFFSET %s LIMIT %s;
 ```
 
-## Endpoint 12 — GET /api/v1/{merchant:string}/popular_merchant_products
+## Endpoint 11 — GET /api/v1/{merchant:string}/popular_merchant_products
 
 ```sql
 SELECT 
@@ -744,7 +709,7 @@ WHERE
 ```
 
 
-## Endpoint 13 — GET /api/v1/{merchant:string}/popular_merchant_products/category/{category_id:int}
+## Endpoint 12 — GET /api/v1/{merchant:string}/popular_merchant_products/category/{category_id:int}
 
 ```sql
 SELECT 
@@ -859,7 +824,7 @@ WHERE
 	OFFSET %s LIMIT %s;
 ```
 
-## Endpoint 14 — GET /api/v1/popular_categories
+## Endpoint 13 — GET /api/v1/popular_categories
 
 ```sql
 SELECT 
@@ -875,7 +840,7 @@ LIMIT %s -- 10 ;
 ```
 
 
-## Endpoint 15 — GET /api/v1/popular_categories/{merchant_id:string}
+## Endpoint 14 — GET /api/v1/popular_categories/{merchant_id:string}
 
 ```sql
 SELECT
@@ -919,7 +884,7 @@ OFFSET %s --0;
 ```
 
 
-## Endpoint 16 — GET /api/v1/search/{query:string}
+## Endpoint 15 — GET /api/v1/search/{query:string}
 
 ```sql
 SELECT
@@ -953,7 +918,7 @@ cbt.code,
 prc.merchant;
 ```
 
-## Endpoint 17 — GET /api/v1/search/all/<query:string>
+## Endpoint 16 — GET /api/v1/search/all/<query:string>
 
 ```sql
 SELECT json_build_object(
@@ -1141,7 +1106,7 @@ SELECT json_build_object(
 ) AS result;
 ```
 
-## Endpoint 18 — GET /api/v1/products/search/{query:string}
+## Endpoint 17 — GET /api/v1/products/search/{query:string}
 
 ```sql
 SELECT 
@@ -1169,7 +1134,7 @@ pt.name->>'en',
 GROUP BY pt.id,icp.value,rc.id; 
 ```
 
-## Endpoint 19 — GET /api/v1/categories/search?query={query:string}
+## Endpoint 18 — GET /api/v1/categories/search?query={query:string}
 
 ```sql
 SELECT pec.id,
@@ -1190,7 +1155,7 @@ OFFSET %s --0
 LIMIT %s; --10;
 ```
 
-## Endpoint 20 — GET /api/v1/total_products
+## Endpoint 19 — GET /api/v1/total_products
 
 ```sql
 WITH merchant_status_check AS (
@@ -1795,7 +1760,7 @@ WHERE pp.row_num > ((SELECT page FROM params) - 1) * (SELECT per_page FROM param
 ORDER BY pp.row_num;
 ```
 
-## Endpoint 21 — GET /api/v1/merchants/list_all
+## Endpoint 20 — GET /api/v1/merchants/list_all
 
 ```sql
 WITH params AS (
@@ -2012,7 +1977,7 @@ CROSS JOIN counted c
 ORDER BY pp.id DESC;
 ```
 
-## Endpoint 22 — GET /api/v1/merchant/{merchant}
+## Endpoint 21 — GET /api/v1/merchant/{merchant}
 
 ```sql
 WITH params AS (
@@ -2166,4 +2131,131 @@ LEFT JOIN branch_payload bp ON bp.parent_id = c.id;
 
 
 -----------------------------------
+```
+
+
+## Endpoint 22 — GET /api/v1/wishlist/{user_id}
+
+Returns a paginated list of wishlist items for a specific user, including product details, reviews, and active discounts (either direct product discounts or loyalty programs).
+
+Tables: res_partner, wishlist, product_template, res_company, product_product, product_review, product_discount, loyalty_program, loyalty_reward
+
+```sql
+-- 1. Partner Resolution
+SELECT id FROM res_partner WHERE app_user_id = $1 LIMIT 1;
+
+-- 2. Total Count
+SELECT COUNT(*) 
+FROM wishlist wl
+JOIN product_template pt ON pt.id = wl.product_id
+LEFT JOIN res_company rc  ON rc.id = pt.company_id
+WHERE wl.user_id = $1
+  AND wl.is_active = TRUE
+  AND rc.cps_enabled = TRUE
+  AND wl.ecommerce_float_price >= $2
+  AND wl.ecommerce_float_price <= $3
+  -- AND pt.ecomerce_category_id = $4 (if category_id provided)
+;
+
+-- 3. Main Query
+WITH base AS (
+    SELECT
+        wl.id,
+        pt.id                                                         AS product_id,
+        COALESCE(pt.name->>'en_US', pt.name::text)                    AS name,
+        wl.ecommerce_float_price                                      AS price,
+        COALESCE(rc.merchant, '')                                     AS merchant,
+        pt.company_id
+    FROM wishlist wl
+    JOIN product_template pt ON pt.id = wl.product_id
+    LEFT JOIN res_company rc  ON rc.id = pt.company_id
+    WHERE wl.user_id = $1
+      AND wl.is_active = TRUE
+      AND rc.cps_enabled = TRUE
+      AND wl.ecommerce_float_price >= $2
+      AND wl.ecommerce_float_price <= $3
+      -- AND pt.ecomerce_category_id = $4
+    ORDER BY wl.id DESC -- or wl.ecommerce_float_price ASC/DESC
+    LIMIT $4 OFFSET $5
+)
+SELECT
+    b.id,
+    b.product_id,
+    b.name,
+    rev.avg_rating,
+    rev.total_review,
+    
+    (
+        SELECT COUNT(*) FROM product_product pp
+        WHERE pp.product_tmpl_id = b.product_id AND pp.active = TRUE
+    ) AS total_variants,
+    
+    b.price,
+    b.merchant,
+    COALESCE(disc.discount_sum, loy.discount_sum)     AS discounts,
+    COALESCE(disc.discount_json, loy.discount_json)   AS loyalty_programs
+    
+FROM base b
+
+LEFT JOIN LATERAL (
+    SELECT 
+        AVG(pr.rating::numeric) AS avg_rating, 
+        COUNT(pr.id)            AS total_review
+    FROM product_review pr 
+    WHERE pr.product_template = b.product_id
+) rev ON true
+
+LEFT JOIN LATERAL (
+    SELECT 
+        SUM(
+            CASE WHEN d.discount_type = 'percentage'
+                THEN ROUND((b.price - (b.price * d.discount_value / 100))::numeric, 2)
+                ELSE ROUND((b.price - d.discount_value)::numeric, 2)
+            END
+        ) AS discount_sum,
+        json_agg(json_build_object(
+            'name',           d.name,
+            'discount_type',  INITCAP(d.discount_type),
+            'discount_value', CASE WHEN d.discount_value = FLOOR(d.discount_value) THEN d.discount_value::text || '.0' ELSE d.discount_value::text END,
+            'start_date',     TO_CHAR(d.start_date, 'DD/MM/YY'),
+            'end_date',       TO_CHAR(d.end_date, 'DD/MM/YY')
+        )) AS discount_json
+    FROM product_discount d
+    WHERE d.product_tmpl_id = b.product_id
+      AND d.is_active = TRUE
+      AND d.company_id IS NOT NULL
+      AND d.x_superapp_approval_status = 'approved'
+      AND (d.start_date IS NULL OR d.start_date <= CURRENT_DATE)
+      AND (d.end_date   IS NULL OR d.end_date   >= CURRENT_DATE)
+) disc ON true
+
+LEFT JOIN LATERAL (
+    SELECT 
+        SUM(
+            ROUND((
+                CASE WHEN lr.discount_mode = 'percent'
+                    THEN b.price - (b.price * lr.discount / 100)
+                    ELSE b.price - lr.discount
+                END
+            )::numeric, 2)
+        ) AS discount_sum,
+        json_agg(json_build_object(
+            'name',           lp.name->>'en_US',
+            'discount_type',  CASE WHEN lr.discount_mode = 'percent' THEN 'Percentage' ELSE INITCAP(lr.discount_mode) END,
+            'discount_value', CASE WHEN lr.discount = FLOOR(lr.discount) THEN lr.discount::text || '.0' ELSE lr.discount::text END,
+            'start_date',     TO_CHAR(lp.date_from, 'DD/MM/YY'),
+            'end_date',       TO_CHAR(lp.date_to, 'DD/MM/YY')
+        )) AS discount_json
+    FROM loyalty_program lp
+    JOIN loyalty_reward lr ON lr.program_id = lp.id
+    WHERE lp.company_id = b.company_id
+      AND lp.is_ecommerce = TRUE
+      AND lp.x_superapp_approval_status = 'approved'
+      AND (lp.date_from IS NULL OR lp.date_from <= CURRENT_DATE)
+      AND (lp.date_to   IS NULL OR lp.date_to   >= CURRENT_DATE)
+      AND disc.discount_sum IS NULL
+) loy ON true
+
+ORDER BY b.id DESC -- or b.price ASC/DESC
+;
 ```
