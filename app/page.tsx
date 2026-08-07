@@ -257,6 +257,9 @@ const NAV: NavItem[] = [
   { kind: "link",    id: "endpoint-23-get-apiv1driverorders",                       label: "23. Driver Orders List"},
   { kind: "link",    id: "endpoint-24-get-apiv1driverorderorder_idint",             label: "24. Driver Order Detail"},
   { kind: "link",    id: "endpoint-25-get-apiv1driverhistory",                      label: "25. Driver History"    },
+  { kind: "link",    id: "endpoint-26-get-apiv1categories",                         label: "26. Categories"        },
+  { kind: "link",    id: "endpoint-27-get-apiv1categoriescategory_idint",           label: "27. Category Details"  },
+  { kind: "link",    id: "endpoint-28-get-apiv1productproduct_tmpl_idint",          label: "28. Product Details"   },
 ]
 
 // ---------------------------------------------------------------------------
