@@ -237,19 +237,22 @@ const NAV: NavItem[] = [
   { kind: "link",    id: "endpoint-4-get-apiv1driverhistory",                       label: "4. Driver History"     },
   { kind: "link",    id: "endpoint-5-get-apiv1productpurchase_status",              label: "5. Purchase Status"    },
   { kind: "link",    id: "endpoint-6-get-apiv1orderslist",                          label: "6. Orders List"        },
-  { kind: "link",    id: "endpoint-7-get-apiv1categoryads",                         label: "7. Category Ads"       },
-  { kind: "link",    id: "endpoint-8-get-apiv1populars",                            label: "8. Popular Merchants"  },
-  { kind: "link",    id: "endpoint-9-get-apiv1popular_categories",                  label: "9. Popular Categories" },
-  { kind: "link",    id: "endpoint-10-get-apiv1popular_categoriesmerchant_idstring",label: "10. Merch Categories"  },
-  { kind: "link",    id: "endpoint-11-get-apiv1popular_products",                   label: "11. Popular Products"  },
-  { kind: "link",    id: "endpoint-12-get-apiv1merchantstringpopular_merchant_products", label: "12. Merch Products"},
-  { kind: "link",    id: "endpoint-13-get-apiv1merchantstringpopular_merchant_productscategorycategory_idint", label: "13. Merch Cat Prods"},
-  { kind: "link",    id: "endpoint-14-get-apiv1popular_categories",                 label: "14. Popular Categories"},
-  { kind: "link",    id: "endpoint-15-get-apiv1popular_categoriesmerchant_idstring",label: "15. Merch Categories"  },
+  { kind: "link",    id: "endpoint-7-get-apiv1categoryads",                         label: "7. Category Ads List"  },
+  { kind: "link",    id: "endpoint-8-get-apiv1populars",                            label: "8. Popular Merchants List" },
+  { kind: "link",    id: "endpoint-9-get-apiv1popular_categories",                  label: "9. Popular Categories List" },
+  { kind: "link",    id: "endpoint-10-get-apiv1popular_categoriesmerchant_idstring",label: "10. Popular Categories List By Merchant" },
+  { kind: "link",    id: "endpoint-11-get-apiv1popular_products",                   label: "11. Popular Products List" },
+  { kind: "link",    id: "endpoint-12-get-apiv1merchantstringpopular_merchant_products", label: "12. Popular Product By Merchant" },
+  { kind: "link",    id: "endpoint-13-get-apiv1merchantstringpopular_merchant_productscategorycategory_idint", label: "13. Popular Merchant Product By Category" },
+  { kind: "link",    id: "endpoint-14-get-apiv1popular_categories",                 label: "14. Popular Categories" },
+  { kind: "link",    id: "endpoint-15-get-apiv1popular_categoriesmerchant_idstring",label: "15. Popular Categories By Merchant" },
   { kind: "link",    id: "endpoint-16-get-apiv1searchquerystring",                  label: "16. Search Merchant"   },
   { kind: "link",    id: "endpoint-17-get-apiv1searchallquerystring",               label: "17. Search All"        },
   { kind: "link",    id: "endpoint-18-get-apiv1productssearchquerystring",          label: "18. Product Search"    },
   { kind: "link",    id: "endpoint-19-get-apiv1categoriessearchqueryquerystring",   label: "19. Category Search"   },
+  { kind: "link",    id: "endpoint-20-get-apiv1total_products",                     label: "20. Total Products"    },
+  { kind: "link",    id: "endpoint-21-get-apiv1merchantslist_all",                  label: "21. List All Merchants"},
+  { kind: "link",    id: "endpoint-22-get-apiv1merchantmerchant",                   label: "22. Merchant Details"  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -332,6 +335,7 @@ export default function DocsPage() {
                     <a
                       key={item.id}
                       href={`#${item.id}`}
+                      title={item.label}
                       className="group flex items-center gap-2 px-2.5 py-[6px] rounded-lg text-[12px] font-medium text-zinc-500 hover:text-primary hover:bg-primary/[0.06] transition-all duration-150"
                     >
                       <span className="w-1 h-1 rounded-full bg-zinc-300 group-hover:bg-primary group-hover:scale-[1.8] transition-all shrink-0" />
