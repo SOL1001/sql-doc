@@ -221,6 +221,7 @@ function mdToHtml(md: string): { html: string; copyMap: Record<string, string> }
   return { html, copyMap }
 }
 
+
 // ---------------------------------------------------------------------------
 // Navigation — IDs match slugify() output on QUERIES.md ## headings exactly
 // ---------------------------------------------------------------------------
