@@ -3406,3 +3406,95 @@ WHERE pf.id=(SELECT product_tmpl_id FROM params)
 LIMIT 1;
 ```
 
+## Endpoint 29 — GET api/v1/delivery_products
+
+
+```sql
+-------------------------------------------------------------------------------
+-- GET /api/v1/delivery_products
+-- Parm 
+-- src_location = Addis Abeba
+-- dest_location = Addis Abeba
+-- medium = CAR | TRUCK | BIKE
+-------------------------------------------------------------------------------
+WITH params AS (
+    SELECT
+        NULLIF('Addis Abeba', '')::text AS dest_location,
+        NULLIF('Addis Abeba', '')::text AS src_location,
+        NULLIF('CAR', '')::text AS medium
+),
+dest_attributes AS (
+    SELECT ptav.id
+    FROM product_template_attribute_value ptav
+    JOIN product_attribute_value pav ON pav.id = ptav.product_attribute_value_id
+    CROSS JOIN params p
+    WHERE p.dest_location IS NOT NULL AND pav.name->>'en_US' ILIKE '%' || p.dest_location || '%'
+),
+src_attributes AS (
+    SELECT ptav.id
+    FROM product_template_attribute_value ptav
+    JOIN product_attribute_value pav ON pav.id = ptav.product_attribute_value_id
+    CROSS JOIN params p
+    WHERE p.src_location IS NOT NULL AND pav.name->>'en_US' ILIKE '%' || p.src_location || '%'
+),
+medium_attributes AS (
+    SELECT ptav.id
+    FROM product_template_attribute_value ptav
+    JOIN product_attribute_value pav ON pav.id = ptav.product_attribute_value_id
+    CROSS JOIN params p
+    WHERE p.medium IS NOT NULL AND pav.name->>'en_US' ILIKE '%' || p.medium || '%'
+),
+candidate_products AS (
+    SELECT pp.id, pp.ecommerce_float_price, pt.name->>'en_US' AS name
+    FROM product_product pp
+    JOIN product_template pt ON pt.id = pp.product_tmpl_id
+    CROSS JOIN params p
+
+    WHERE
+        pp.active = true
+        AND pt.active = true
+        AND pt.x_superapp_approval_status = 'approved'
+        AND pt.is_for_ecommerce = true
+        AND EXISTS (
+            SELECT 1
+            FROM res_company rc
+            WHERE rc.id = pt.company_id
+              AND rc.active = true
+              AND rc.is_delivery = true
+        )
+        AND (
+            p.dest_location IS NULL
+            OR EXISTS (
+                SELECT 1
+                FROM product_variant_combination pvc
+                WHERE pvc.product_product_id = pp.id
+                  AND pvc.product_template_attribute_value_id
+                      IN (SELECT id FROM dest_attributes)
+            )
+        )
+        AND (
+            p.src_location IS NULL
+            OR EXISTS (
+                SELECT 1
+                FROM product_variant_combination pvc
+                WHERE pvc.product_product_id = pp.id
+                  AND pvc.product_template_attribute_value_id IN (SELECT id FROM src_attributes)
+            )
+        )
+        AND (
+            p.medium IS NULL
+            OR EXISTS (
+                SELECT 1
+                FROM product_variant_combination pvc
+                WHERE pvc.product_product_id = pp.id
+                  AND pvc.product_template_attribute_value_id IN (SELECT id FROM medium_attributes)
+            )
+        )
+)
+SELECT id,ecommerce_float_price,name
+FROM candidate_products ORDER BY id;
+
+
+
+```
+
