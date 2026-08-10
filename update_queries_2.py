@@ -106,3 +106,5 @@ if "endpoint-26" not in p_content:
 
 with open('app/page.tsx', 'w') as f:
     f.write(p_content)
+
+
