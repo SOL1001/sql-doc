@@ -1972,51 +1972,42 @@ ORDER BY
 ## Endpoint 21 — GET /api/v1/merchant/{merchant}
 
 ```sql
+
 WITH params AS (
     SELECT
-        'http://localhost:8062'::text AS base_url,
-        'MRT00042R12'::text AS merchant
+        NULL::text AS merchant
 ),
 merchant_company AS (
-    SELECT c.*
+    SELECT
+        c.id, c.name, c.merchant,
+        c.logo_url, c.banner_url, c.product_count, c.variant_count,
+        c.open_hour, c.open_moment, c.close_hour, c.close_moment,
+        c.cps_account_number, c.lat_location, c.lng_location,
+        c.map_holder, c.description, c.is_featured,
+        c.is_delivery, c.business_type_id, c.partner_id
     FROM params p
-    JOIN res_company c ON c.merchant = p.merchant
+    JOIN res_company c
+        ON c.merchant = p.merchant
     WHERE c.active IS TRUE
     LIMIT 1
 ),
 branches AS (
-    SELECT b.*
+    SELECT
+        b.id, b.parent_id, b.name,
+        b.merchant, b.logo_url, b.banner_url,
+        b.product_count, b.variant_count, b.open_hour,
+        b.open_moment, b.close_hour, b.close_moment,
+        b.cps_account_number, b.lat_location, b.lng_location,
+        b.map_holder, b.description, b.is_featured, b.is_delivery,
+        b.business_type_id, b.partner_id
     FROM res_company b
-    JOIN merchant_company mc ON mc.id = b.parent_id
+    JOIN merchant_company mc
+        ON mc.id = b.parent_id
     WHERE b.cps_enabled IS TRUE
       AND COALESCE(b.is_delivery, FALSE) IS FALSE
       AND b.active IS TRUE
       AND b.merchant IS NOT NULL
       AND b.merchant != ''
-),
-company_ids AS (
-    SELECT id FROM merchant_company
-    UNION
-    SELECT id FROM branches
-),
-template_counts AS (
-    SELECT company_id, COUNT(*)::int AS product_template_count
-    FROM product_template
-    WHERE company_id IN (SELECT id FROM company_ids)
-      AND active IS TRUE
-      AND is_for_ecommerce IS TRUE
-      AND x_superapp_approval_status = 'approved'
-    GROUP BY company_id
-),
-variant_counts AS (
-    SELECT pt.company_id, COUNT(*)::int AS product_variant_count
-    FROM product_product pp
-    JOIN product_template pt ON pt.id = pp.product_tmpl_id
-    WHERE pt.company_id IN (SELECT id FROM company_ids)
-      AND pp.active IS TRUE
-      AND pt.is_for_ecommerce IS TRUE
-      AND pt.x_superapp_approval_status = 'approved'
-    GROUP BY pt.company_id
 ),
 branch_payload AS (
     SELECT
@@ -2026,96 +2017,122 @@ branch_payload AS (
                 'id', b.id,
                 'name', b.name,
                 'branch_id', b.merchant,
-                'is_featured', COALESCE(b.is_featured, FALSE),
-                'business_type', bbt.code,
+                'is_featured',COALESCE(b.is_featured, FALSE),
+                'business_type',bbt.code,
                 'opening_time',
-                    LPAD(FLOOR(COALESCE(b.open_hour, 0))::int::text, 2, '0')
-                    || ':'
-                    || LPAD(ROUND(((COALESCE(b.open_hour, 0) - FLOOR(COALESCE(b.open_hour, 0))) * 60)::numeric)::int::text, 2, '0')
-                    || ' '
-                    || UPPER(COALESCE(b.open_moment, '')),
+                CASE
+                    WHEN b.open_hour IS NOT NULL
+                     AND b.open_moment IS NOT NULL
+                    THEN
+                        LPAD(FLOOR(b.open_hour)::int::text,2,'0')
+                        || ':'||
+                        LPAD(
+                            LEAST(
+                                FLOOR( ( b.open_hour - FLOOR(b.open_hour) ) * 60 )::numeric, 59
+                            )::int::text, 2,'0'
+                        )
+                        || ' ' || UPPER(b.open_moment)
+                    ELSE NULL
+                END,
                 'closing_time',
-                    LPAD(FLOOR(COALESCE(b.close_hour, 0))::int::text, 2, '0')
-                    || ':'
-                    || LPAD(ROUND(((COALESCE(b.close_hour, 0) - FLOOR(COALESCE(b.close_hour, 0))) * 60)::numeric)::int::text, 2, '0')
-                    || ' '
-                    || UPPER(COALESCE(b.close_moment, '')),
-                'cps_account_number', NULLIF(b.cps_account_number, ''),
-                'email', NULLIF(brp.email, ''),
-                'phone', NULLIF(brp.phone, ''),
-                'lat_location', NULLIF(b.lat_location, 0),
-                'lng_location', NULLIF(b.lng_location, 0),
-                'map_holder', NULLIF(b.map_holder, ''),
-                'street', NULLIF(brp.street, ''),
-                'city', NULLIF(brp.city, ''),
-                'description', NULLIF(b.description, ''),
-                'product_template_count', COALESCE(btc.product_template_count, 0),
-                'product_variant_count', COALESCE(bvc.product_variant_count, 0),
-                'is_delivery', COALESCE(b.is_delivery, FALSE),
-                'is_ecommerce', NOT COALESCE(b.is_delivery, FALSE)
+                CASE
+                    WHEN b.close_hour IS NOT NULL
+                     AND b.close_moment IS NOT NULL
+                    THEN
+                        LPAD(FLOOR(b.close_hour)::int::text,2,'0')
+                        || ':' ||
+                        LPAD(
+                            LEAST(
+                                FLOOR((b.close_hour - FLOOR(b.close_hour) ) * 60)::numeric,59
+                            )::int::text,2,'0'
+                        )
+                        || ' ' || UPPER(b.close_moment)
+                    ELSE NULL
+                END,
+                'cps_account_number',NULLIF(b.cps_account_number,''),
+                'email',NULLIF(brp.email,''),
+                'phone',NULLIF(brp.phone,''),
+                'lat_location',NULLIF(b.lat_location,0),
+                'lng_location',NULLIF(b.lng_location,0),
+                'map_holder',NULLIF(b.map_holder,''),
+                'street',NULLIF(brp.street,''),
+                'city',NULLIF(brp.city,''),
+                'description',NULLIF(b.description,''),
+                'product_template_count',COALESCE(b.product_count,0),
+                'product_variant_count',COALESCE(b.variant_count,0),
+                'is_delivery',COALESCE(b.is_delivery,FALSE),
+                'is_ecommerce',NOT COALESCE(b.is_delivery,FALSE)
             )
             ORDER BY b.id
         ) AS branches
     FROM branches b
-    LEFT JOIN template_counts btc ON btc.company_id = b.id
-    LEFT JOIN variant_counts bvc ON bvc.company_id = b.id
-    LEFT JOIN company_business_type bbt ON bbt.id = b.business_type_id
-    LEFT JOIN res_partner brp ON brp.id = b.partner_id
-    GROUP BY b.parent_id
+    LEFT JOIN company_business_type bbt
+        ON bbt.id = b.business_type_id
+    LEFT JOIN res_partner brp
+        ON brp.id = b.partner_id
+    GROUP BY
+        b.parent_id
 )
 SELECT
-    c.id,
-    c.name,
-    c.merchant AS merchant_id,
+    mc.id,
+    mc.name,
+    mc.merchant AS merchant_id,
     bt.code AS business_type,
-
+    NULLIF( mc.logo_url,'') AS logo,
+    COALESCE( mc.is_featured, FALSE ) AS is_featured,
+    NULLIF( mc.banner_url, '' ) AS banner,
     CASE
-        WHEN c.has_logo IS NOT NULL AND c.has_logo != false
-        THEN p.base_url || '/api/v1/merchant/logo/' || c.id
+        WHEN mc.open_hour IS NOT NULL
+         AND mc.open_moment IS NOT NULL
+        THEN
+            LPAD( FLOOR(mc.open_hour)::int::text, 2, '0' )
+            || ':' ||
+            LPAD(
+                LEAST(
+                    FLOOR((mc.open_hour - FLOOR(mc.open_hour) ) * 60 )::numeric,59
+                )::int::text,2,'0')
+            || ' ' || UPPER(mc.open_moment)
         ELSE NULL
-    END AS logo,
-
-    COALESCE(c.is_featured, FALSE) AS is_featured,
-
+    END AS opening_time,
     CASE
-        WHEN c.has_banner IS NOT NULL AND c.has_banner != false
-        THEN p.base_url || '/api/v1/merchant/banner/' || c.id
+        WHEN mc.close_hour IS NOT NULL
+         AND mc.close_moment IS NOT NULL
+        THEN
+            LPAD( FLOOR(mc.close_hour)::int::text, 2,'0' )
+            || ':' ||
+            LPAD(
+                LEAST(
+                    FLOOR(
+                        ( mc.close_hour - FLOOR(mc.close_hour) ) * 60
+                    )::numeric, 59
+                )::int::text, 2,'0'
+            )
+            || ' ' || UPPER(mc.close_moment)
         ELSE NULL
-    END AS banner,
-
-    LPAD(FLOOR(COALESCE(c.open_hour, 0))::int::text, 2, '0')
-        || ':'
-        || LPAD(ROUND(((COALESCE(c.open_hour, 0) - FLOOR(COALESCE(c.open_hour, 0))) * 60)::numeric)::int::text, 2, '0')
-        || ' '
-        || UPPER(COALESCE(c.open_moment, '')) AS opening_time,
-    LPAD(FLOOR(COALESCE(c.close_hour, 0))::int::text, 2, '0')
-        || ':'
-        || LPAD(ROUND(((COALESCE(c.close_hour, 0) - FLOOR(COALESCE(c.close_hour, 0))) * 60)::numeric)::int::text, 2, '0')
-        || ' '
-        || UPPER(COALESCE(c.close_moment, '')) AS closing_time,
-    NULLIF(c.cps_account_number, '') AS cps_account_number,
-    NULLIF(c.lat_location, 0) AS lat_location,
-    NULLIF(c.lng_location, 0) AS lng_location,
-    NULLIF(c.map_holder, '') AS map_holder,
-    NULLIF(rp.street, '') AS street,
-    NULLIF(rp.city, '') AS city,
-    NULLIF(c.description, '') AS description,
-    COALESCE(bp.branches, '[]'::jsonb) AS branches,
-    COALESCE(tc.product_template_count, 0) AS product_template_count,
-    COALESCE(vc.product_variant_count, 0) AS product_variant_count,
-    COALESCE(c.is_delivery, FALSE) AS is_delivery,
-    NOT COALESCE(c.is_delivery, FALSE) AS is_ecommerce
-FROM params p
-JOIN merchant_company c ON TRUE
-LEFT JOIN company_business_type bt ON bt.id = c.business_type_id
-LEFT JOIN res_partner rp ON rp.id = c.partner_id
-LEFT JOIN template_counts tc ON tc.company_id = c.id
-LEFT JOIN variant_counts vc ON vc.company_id = c.id
-LEFT JOIN branch_payload bp ON bp.parent_id = c.id;
+    END AS closing_time,
+    NULLIF(mc.cps_account_number,'') AS cps_account_number,
+    NULLIF(mc.lat_location,0) AS lat_location,
+    NULLIF(mc.lng_location,0) AS lng_location,
+    NULLIF(mc.map_holder,'') AS map_holder,
+    NULLIF(rp.street,'') AS street,
+    NULLIF(rp.city,'') AS city,
+    NULLIF(mc.description,'') AS description,
+    COALESCE(bp.branches,'[]'::jsonb) AS branches,
+    COALESCE(mc.product_count,0) AS product_template_count,
+    COALESCE(mc.variant_count,0) AS product_variant_count,
+    COALESCE(mc.is_delivery,FALSE) AS is_delivery,
+    NOT COALESCE(mc.is_delivery,FALSE) AS is_ecommerce
+FROM merchant_company mc
+LEFT JOIN company_business_type bt
+    ON bt.id = mc.business_type_id
+LEFT JOIN res_partner rp
+    ON rp.id = mc.partner_id
+LEFT JOIN branch_payload bp
+    ON bp.parent_id = mc.id;
 
 
+	
 
------------------------------------
 ```
 
 ## Endpoint 22 — GET /api/v1/wishlist/{user_id}
