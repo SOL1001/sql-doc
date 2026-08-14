@@ -4,216 +4,228 @@
 
 ## Endpoint 1 — GET /api/v1/orders
 
-Returns a paginated list of sale orders for a user. Supports filtering by merchant and order history status.
-We have optimized this endpoint to use a single highly-optimized CTE + LATERAL query.
+Returns a paginated list of sale orders for a user with order lines, merchant info, and S3 image URLs.
+Logic mirrors Odoo `list_orders`; images use S3 URL columns instead of Odoo image API paths.
 
-Tables: sale_order, res_company, res_partner, res_country_state, res_country, sale_order_line, product_product, product_template, uom_uom
+
+
+Parameters:
+  $1 — app_user_id
+  $2 — merchant slug (empty string = no filter)
+  $3 — history filter (`active` | `inactive` | `all` | empty)
+  $4 — per_page (limit)
+  $5 — offset
+
+Returns one row: `partner_exists`, `merchant_ok`, `total_count`, `orders_json`.
 
 ```sql
-WITH partner AS (
-    SELECT id FROM res_partner WHERE app_user_id = $1 AND active = TRUE LIMIT 1
+WITH input AS (
+    SELECT $1::text AS app_user_id, $2::text AS merchant_filter,
+           $3::text AS history, $4::int AS lim, $5::int AS off
 ),
-company AS (
-    SELECT id FROM res_company WHERE merchant = $2 AND is_delivery = FALSE AND merchant IS NOT NULL LIMIT 1
+partner AS (
+    SELECT p.id FROM res_partner p JOIN input i ON TRUE
+    WHERE p.app_user_id = i.app_user_id AND p.active = TRUE LIMIT 1
 ),
-base_orders AS (
+merchant_company AS (
+    SELECT c.id FROM res_company c JOIN input i ON TRUE
+    WHERE i.merchant_filter <> '' AND c.merchant = i.merchant_filter
+      AND c.is_delivery = FALSE AND c.merchant IS NOT NULL LIMIT 1
+),
+filtered AS (
     SELECT so.id, so.name, so.state, so.superapp_order_status, so.date_order,
            ROUND(so.amount_total::numeric, 2) AS total_price, so."deliveryType",
-           so.driver_name, so.driver_mobile, so.driver_delivery_medium, so.company_id
-    FROM sale_order so
-    WHERE so.partner_id = (SELECT id FROM partner)
-      AND so.is_superapp_order = TRUE
-      -- AND so.company_id = (SELECT id FROM company) -- if merchant provided
-      -- AND so.superapp_order_status NOT IN ('cancelled', 'delivered') -- if history=active
-      -- AND so.superapp_order_status IN ('delivered', 'cancelled') -- if history=inactive
-    ORDER BY so.id DESC
-    LIMIT $3 OFFSET $4
-),
-total_count AS (
-    SELECT COUNT(*) AS c
-    FROM sale_order so
-    WHERE so.partner_id = (SELECT id FROM partner)
-      AND so.is_superapp_order = TRUE
-      -- AND so.company_id = (SELECT id FROM company)
-      -- AND so.superapp_order_status NOT IN ('cancelled', 'delivered')
-),
-aggregated_orders AS (
-    SELECT json_agg(
-        json_build_object(
-            'id', bo.id,
-            'name', bo.name,
-            'state', bo.state,
-            'superapp_order_status', bo.superapp_order_status,
-            'date_order', TO_CHAR(bo.date_order AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
-            'total_price', bo.total_price,
-            'deliveryType', bo."deliveryType",
-            'driver_info', CASE WHEN bo."deliveryType" = 'delivery' THEN json_build_object(
-                'driver_name', bo.driver_name,
-                'driver_mobile', bo.driver_mobile,
-                'driver_delivery_medium', bo.driver_delivery_medium
-            ) ELSE NULL END,
-            'company_info', json_build_object(
-                'company_id', rc.id,
-                'merchant', rc.merchant,
-                'company_name', rc.name,
-                'has_logo', rc.logo_web IS NOT NULL,
-                'lat_location', rc.lat_location,
-                'lng_location', rc.lng_location,
-                'company_phone', rc.phone,
-                'street', rp.street,
-                'city', rp.city,
-                'state_name', rs.name,
-                'country_name', rco.name->>'en_US',
-                'parent_name', rcp.name
-            ),
-            'order_lines', COALESCE(lines.lines_json, '[]'::json)
-        ) ORDER BY bo.id DESC
-    ) AS orders_json
-    FROM base_orders bo
-    LEFT JOIN res_company rc ON rc.id = bo.company_id
+           so.driver_name, so.driver_mobile, so.driver_email, so.driver_delivery_medium,
+           rc.id AS company_id, rc.merchant, rc.name AS company_name,
+           NULLIF(TRIM(COALESCE(rc.logo_url, rp.image_1920_url, '')), '') AS logo_url,
+           rc.lat_location, rc.lng_location, rc.phone AS company_phone,
+           rp.street, rp.city, rcs.name AS state_name, rco.name->>'en_US' AS country_name,
+           rcp.name AS parent_name
+    FROM input i
+    JOIN partner p ON TRUE
+    JOIN sale_order so ON so.partner_id = p.id AND so.is_superapp_order = TRUE
+    LEFT JOIN res_company rc ON rc.id = so.company_id
     LEFT JOIN res_partner rp ON rp.id = rc.partner_id
-    LEFT JOIN res_country_state rs ON rs.id = rp.state_id
+    LEFT JOIN res_country_state rcs ON rcs.id = rp.state_id
     LEFT JOIN res_country rco ON rco.id = rp.country_id
     LEFT JOIN res_company rcp ON rcp.id = rc.parent_id
-    LEFT JOIN LATERAL (
-        SELECT json_agg(
-            json_build_object(
-                'id', sol.id,
-                'product_id', sol.product_id,
-                'product_name', CASE WHEN attrs.attributes IS NOT NULL THEN CONCAT(pt.name->>'en_US', ' (', attrs.attributes, ')') ELSE pt.name->>'en_US' END,
-                'product_uom_qty', sol.product_uom_qty,
-                'uom_name', u.name->>'en_US',
+    WHERE (i.merchant_filter = '' OR so.company_id = (SELECT id FROM merchant_company))
+      AND (i.history = '' OR i.history = 'all'
+           OR (i.history = 'active' AND so.superapp_order_status NOT IN ('cancelled','delivered'))
+           OR (i.history = 'inactive' AND so.superapp_order_status IN ('delivered','cancelled')))
+),
+guard AS (
+    SELECT EXISTS(SELECT 1 FROM partner) AS partner_exists,
+           CASE WHEN (SELECT merchant_filter FROM input) = '' THEN TRUE
+                ELSE EXISTS(SELECT 1 FROM merchant_company) END AS merchant_ok,
+           COALESCE((SELECT COUNT(*)::int FROM filtered), 0) AS total_count
+),
+paged AS (
+    SELECT f.* FROM filtered f
+    JOIN guard g ON g.partner_exists AND g.merchant_ok
+    ORDER BY f.id DESC
+    LIMIT (SELECT lim FROM input) OFFSET (SELECT off FROM input)
+),
+orders_data AS (
+    SELECT COALESCE(json_agg(order_obj ORDER BY order_id DESC), '[]'::json) AS orders_json
+    FROM (
+        SELECT b.id AS order_id,
+               json_build_object(
+                   'id', b.id, 'order_ref', b.name, 'state', b.state,
+                   'delivery_status', NULLIF(b.superapp_order_status, ''),
+                   'date_order', TO_CHAR(b.date_order, 'YYYY-MM-DD HH24:MI:SS'),
+                   'total_price', b.total_price, 'delivery_type', b."deliveryType",
+                   'merchant', json_build_object(...),
+                   'driver_info', CASE WHEN b."deliveryType" = 'delivery'
+                       THEN json_build_object(...) ELSE '{}'::json END,
+                   'sale_order_lines', COALESCE(lines.lines_json, '[]'::json)
+               ) AS order_obj
+        FROM paged b
+        LEFT JOIN LATERAL (
+            SELECT json_agg(json_build_object(
+                'id', sol.id, 'product_id', sol.product_id,
+                'product_name', CASE WHEN sol.product_id IS NOT NULL
+                    THEN CASE WHEN attrs.attributes IS NOT NULL AND attrs.attributes <> ''
+                        THEN CONCAT(COALESCE(pt.name->>'en_US', pt.name::text), ' (', attrs.attributes, ')')
+                        ELSE COALESCE(pt.name->>'en_US', pt.name::text, '') END
+                    ELSE COALESCE(NULLIF(sol.name, ''), '') END,
+                'qty', sol.product_uom_qty, 'uom', u.name->>'en_US',
                 'price_unit', ROUND(sol.price_unit::numeric, 2),
-                'price_total', ROUND(sol.price_total::numeric, 2),
-                'company_merchant', rc.merchant
-            ) ORDER BY sol.id ASC
-        ) AS lines_json
-        FROM sale_order_line sol
-        LEFT JOIN product_product pp ON pp.id = sol.product_id
-        LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
-        LEFT JOIN uom_uom u ON u.id = sol.product_uom
-        LEFT JOIN (
-            SELECT pvc.product_product_id, string_agg(pav.name->>'en_US', ', ' ORDER BY pa.sequence) AS attributes
-            FROM product_variant_combination pvc
-            JOIN product_template_attribute_value ptav ON ptav.id = pvc.product_template_attribute_value_id
-            JOIN product_attribute_value pav ON pav.id = ptav.product_attribute_value_id
-            JOIN product_attribute pa ON pa.id = pav.attribute_id
-            GROUP BY pvc.product_product_id
-        ) attrs ON attrs.product_product_id = pp.id
-        WHERE sol.order_id = bo.id
-    ) lines ON true
+                'line_amount', ROUND(sol.price_total::numeric, 2),
+                'product_image', NULLIF(TRIM(COALESCE(pp.image_1920_url, pt.image_1920_url, '')), '')
+            )) AS lines_json
+            FROM sale_order_line sol
+            LEFT JOIN product_product pp ON pp.id = sol.product_id
+            LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
+            LEFT JOIN uom_uom u ON u.id = sol.product_uom
+            WHERE sol.order_id = b.id
+        ) lines ON true
+    ) orders
 )
-SELECT 
-    (SELECT EXISTS(SELECT 1 FROM partner)) AS partner_exists,
-    (SELECT EXISTS(SELECT 1 FROM company)) AS company_exists,
-    (SELECT c FROM total_count) AS total_count,
-    COALESCE((SELECT orders_json FROM aggregated_orders), '[]'::json) AS results;
+SELECT g.partner_exists, g.merchant_ok, g.total_count, od.orders_json
+FROM guard g CROSS JOIN orders_data od;
 ```
+
+Notes:
+  - `product_name` uses `product_id.display_name` (template name + variant attrs); falls back to `sale_order_line.name` only when there is no product.
+  - `location` is built from the company partner address (`res_partner` via `rc.partner_id`); missing state becomes `"False"`.
+  - `driver_info` is `{}` unless `deliveryType = 'delivery'`; driver fields are JSON `null` when empty.
+  - Logo and product images use S3 URL columns (see S3 image URLs section above).
+
+
+
 
 
 
 ## Endpoint 2 — GET /api/v1/{merchant}/orders/{order_id}/status
 
-Returns detailed status of a specific order.
-Optimized to use a single highly-optimized CTE + LATERAL query, combining order details, delivery counts, and order lines.
+Returns detailed status of a specific superapp order for a merchant.
 
-Tables: sale_order, res_company, res_partner, res_country_state, res_country, stock_picking, sale_order_line
+Parameters: `$1` = order id, `$2` = merchant slug
+
+Tables: `sale_order`, `res_company`, `res_partner`, `res_country_state`, `res_country`, `stock_picking`, `sale_order_line`, `product_product`, `product_template`, `uom_uom`, `product_variant_combination`, `product_template_attribute_value`, `product_attribute_value`, `product_attribute`
 
 ```sql
 WITH base AS (
-    SELECT 
-        so.id, so.name, so.state, so.superapp_order_status, so.date_order,
-        so.amount_total, so."deliveryType", so.driver_name, so.driver_mobile,
-        so.driver_email, so.driver_delivery_medium, so.delivery_pickup_code,
-        so.customer_delivery_code, so.require_signature, so.signature,
-        so.require_photo, so.photo, so.driver_assigned, so.rating,
-        so.cancel_reason, so.message_to_driver, so.note, so.lock_id,
+    SELECT
+        so.id                                                                          AS order_id,
+        so.name                                                                        AS order_name,
+        so.state,
+        so.superapp_order_status                                                       AS order_status,
+        ROUND((so.amount_total + COALESCE(dp.ecommerce_float_price, 0))::numeric, 2)   AS amount_total,
         so.invoice_status,
-        -- Company
-        rc.merchant, rc.name AS company_name, rc.logo_web IS NOT NULL AS has_logo,
-        rc.lat_location, rc.lng_location, rc.phone AS company_phone,
-        -- Address
-        rp.street, rp.city, rs.name AS state_name, rco.name->>'en_US' AS country_name,
-        rcp.name AS parent_name,
-        -- Delivery product price
-        (
-            SELECT sol_del.price_total 
-            FROM sale_order_line sol_del 
-            WHERE sol_del.order_id = so.id AND sol_del.is_delivery = TRUE 
-            LIMIT 1
-        ) AS delivery_price
+        so.lock_id,
+        so.ft_reference,
+        so.delivery_lat,
+        so.delivery_long,
+        so.customer_pickup_code,
+        so.driver_name,
+        so.driver_mobile,
+        so.driver_delivery_medium,
+        so."deliveryType"                                                              AS delivery_type,
+        so.date_order,
+        dp.ecommerce_float_price                                                       AS delivery_price,
+
+        rc.id                                                                          AS company_id,
+        rc.name                                                                        AS company_name,
+        rc.merchant                                                                    AS company_merchant,
+        NULLIF(TRIM(COALESCE(rc.logo_url, rp.image_1920_url, '')), '')                AS logo_url,
+        rc.lat_location                                                                AS lat,
+        rc.lng_location                                                                AS lng,
+        rc.phone                                                                       AS company_phone,
+
+        rp.street,
+        rp.city,
+        rs.name                                                                        AS state_name,
+        rco.name->>'en_US'                                                             AS country_name
+
     FROM sale_order so
-    INNER JOIN res_company rc ON rc.id = so.company_id
-    LEFT JOIN res_partner rp ON rp.id = rc.partner_id
-    LEFT JOIN res_country_state rs ON rs.id = rp.state_id
-    LEFT JOIN res_country rco ON rco.id = rp.country_id
-    LEFT JOIN res_company rcp ON rcp.id = rc.parent_id
-    WHERE so.id = $1 AND rc.merchant = $2 AND so.is_superapp_order = TRUE
+    INNER JOIN res_company rc
+            ON rc.id = so.company_id
+           AND rc.merchant = $2
+           AND rc.is_delivery = FALSE
+           AND rc.merchant IS NOT NULL
+    LEFT JOIN res_partner rp          ON rp.id = rc.partner_id
+    LEFT JOIN res_country_state rs    ON rs.id = rp.state_id
+    LEFT JOIN res_country rco         ON rco.id = rp.country_id
+    LEFT JOIN product_product dp
+           ON dp.id = so.delivery_product_id::integer
+          AND so.delivery_product_id IS NOT NULL
+          AND so.delivery_product_id != '0'
+    WHERE so.id = $1
+      AND so.is_superapp_order = TRUE
+    LIMIT 1
 )
-SELECT 
-    (SELECT COUNT(*) FROM base) > 0 AS order_exists,
-    COALESCE((
-        SELECT json_build_object(
-            'id', b.id, 'order_ref', b.name, 'state', b.state,
-            'delivery_status', b.superapp_order_status,
-            'date_order', TO_CHAR(b.date_order AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
-            'total_price', ROUND(b.amount_total::numeric, 2),
-            'deliveryType', b."deliveryType",
-            'delivery_pickup_code', b.delivery_pickup_code,
-            'customer_delivery_code', b.customer_delivery_code,
-            'require_signature', COALESCE(b.require_signature, false),
-            'signature', b.signature,
-            'require_photo', COALESCE(b.require_photo, false),
-            'photo', b.photo,
-            'driver_assigned', b.driver_assigned,
-            'rating', b.rating, 'cancel_reason', b.cancel_reason,
-            'message_to_driver', b.message_to_driver, 'note', b.note,
-            'lock_id', COALESCE(b.lock_id, 'false'),
-            'invoice_status', COALESCE(b.invoice_status, 'false'),
-            'delivery_price', ROUND(COALESCE(b.delivery_price, 0)::numeric, 2),
-            'driver_info', json_build_object(
-                'driver_name', b.driver_name, 'driver_mobile', b.driver_mobile,
-                'driver_email', b.driver_email, 'delivery_medium', b.driver_delivery_medium
+SELECT
+    b.*,
+    COALESCE(pickings.delivery_count, 0) AS delivery_count,
+    COALESCE(lines.lines_json, '[]'::json) AS lines_json
+FROM base b
+LEFT JOIN LATERAL (
+    SELECT COUNT(*)::int AS delivery_count
+    FROM stock_picking sp
+    WHERE sp.sale_id = b.order_id
+) pickings ON true
+LEFT JOIN LATERAL (
+    SELECT json_agg(
+        json_build_object(
+            'id', sol.id,
+            'product_id', sol.product_id,
+            'name', COALESCE(sol.name,
+                CASE
+                    WHEN attrs.attributes IS NOT NULL
+                        THEN CONCAT(pt.name->>'en_US', ' (', attrs.attributes, ')')
+                    ELSE pt.name->>'en_US'
+                END
             ),
-            'merchant', json_build_object(
-                'merchant', b.merchant, 'name', b.company_name, 'has_logo', b.has_logo,
-                'lat', b.lat_location, 'lng', b.lng_location, 'phone', b.company_phone,
-                'parent', b.parent_name, 'street', b.street, 'city', b.city,
-                'state_name', b.state_name, 'country_name', b.country_name
-            ),
-            'delivery_count', COALESCE(delivery.dcount, 0),
-            'sale_order_lines', COALESCE(lines.lines_json, '[]'::json)
+            'qty', sol.product_uom_qty,
+            'uom', u.name->>'en_US',
+            'price_unit', ROUND(sol.price_unit::numeric, 2),
+            'line_amount', ROUND(sol.price_total::numeric, 2),
+            'product_image', NULLIF(TRIM(COALESCE(pp.image_1920_url, pt.image_1920_url, '')), '')
         )
-        FROM base b
-        LEFT JOIN LATERAL (
-            SELECT COUNT(*) AS dcount FROM stock_picking WHERE sale_id = b.id
-        ) delivery ON true
-        LEFT JOIN LATERAL (
-            SELECT json_agg(
-                json_build_object(
-                    'id', sol.id, 'product_id', sol.product_id,
-                    'product_name', CASE WHEN attrs.attributes IS NOT NULL THEN CONCAT(pt.name->>'en_US', ' (', attrs.attributes, ')') ELSE pt.name->>'en_US' END,
-                    'product_uom_qty', sol.product_uom_qty,
-                    'uom_name', u.name->>'en_US', 'price_unit', ROUND(sol.price_unit::numeric, 2),
-                    'price_total', ROUND(sol.price_total::numeric, 2)
-                ) ORDER BY sol.id ASC
-            ) AS lines_json
-            FROM sale_order_line sol
-            LEFT JOIN product_product pp ON pp.id = sol.product_id
-            LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
-            LEFT JOIN uom_uom u ON u.id = sol.product_uom
-            LEFT JOIN (
-                SELECT pvc.product_product_id, string_agg(pav.name->>'en_US', ', ' ORDER BY pa.sequence) AS attributes
-                FROM product_variant_combination pvc
-                JOIN product_template_attribute_value ptav ON ptav.id = pvc.product_template_attribute_value_id
-                JOIN product_attribute_value pav ON pav.id = ptav.product_attribute_value_id
-                JOIN product_attribute pa ON pa.id = pav.attribute_id
-                GROUP BY pvc.product_product_id
-            ) attrs ON attrs.product_product_id = pp.id
-            WHERE sol.order_id = b.id AND COALESCE(sol.is_delivery, FALSE) = FALSE
-        ) lines ON true
-    ), '{}'::json) AS result_json;
+    ) AS lines_json
+    FROM sale_order_line sol
+    LEFT JOIN product_product pp  ON pp.id  = sol.product_id
+    LEFT JOIN product_template pt ON pt.id  = pp.product_tmpl_id
+    LEFT JOIN uom_uom u           ON u.id   = sol.product_uom
+    LEFT JOIN (
+        SELECT
+            pvc.product_product_id,
+            string_agg(pav.name->>'en_US', ', ' ORDER BY pa.sequence) AS attributes
+        FROM product_variant_combination pvc
+        JOIN product_template_attribute_value ptav ON ptav.id = pvc.product_template_attribute_value_id
+        JOIN product_attribute_value pav ON pav.id = ptav.product_attribute_value_id
+        JOIN product_attribute pa ON pa.id = pav.attribute_id
+        WHERE pvc.product_product_id IN (
+            SELECT DISTINCT product_id FROM sale_order_line WHERE order_id = b.order_id
+        )
+        GROUP BY pvc.product_product_id
+    ) attrs ON attrs.product_product_id = pp.id
+    WHERE sol.order_id = b.order_id
+) lines ON true;
 ```
+
 
 
 
@@ -221,7 +233,7 @@ SELECT
 
 Returns paginated product reviews along with all developer replies in a single optimized CTE query.
 
-Tables: product_template, product_review, review_reply, res_partner
+Tables: `product_template`, `product_review`, `review_reply`, `res_partner`
 
 ```sql
 WITH product_check AS (
@@ -270,10 +282,10 @@ aggregated_reviews AS (
         WHERE rr.review_id = b.id
     ) replies ON true
 )
-SELECT 
+SELECT
     (SELECT exists FROM product_check),
     (SELECT c FROM total_reviews),
-    COALESCE((SELECT reviews_json FROM aggregated_reviews), '[]'::json)
+    COALESCE((SELECT reviews_json FROM aggregated_reviews), '[]'::json);
 ```
 
 
@@ -306,10 +318,11 @@ SELECT
 
 ## Endpoint 5 — GET /api/v1/orders/list
 
-Returns a paginated list of merchants that the user has ordered from, including the total number of orders and items per merchant.
-Optimized into a single CTE + LATERAL query.
+Returns merchants grouped by order count for a user, with S3 logo URLs.
 
-Tables: res_partner, sale_order, res_company, sale_order_line
+Query params: `app_user_id`, `page`, `per_page`
+
+Tables: `res_partner`, `sale_order`, `res_company`, `sale_order_line`
 
 ```sql
 WITH partner AS (
@@ -320,13 +333,14 @@ base_companies AS (
         rc.id                            AS company_id,
         rc.name                          AS company_name,
         rc.merchant                      AS merchant,
-        rc.logo_web IS NOT NULL          AS has_logo,
+        NULLIF(TRIM(COALESCE(rc.logo_url, rp.image_1920_url, '')), '') AS logo_url,
         COUNT(so.id)                     AS order_count
     FROM sale_order so
     JOIN res_company rc ON rc.id = so.company_id
+    LEFT JOIN res_partner rp ON rp.id = rc.partner_id
     WHERE so.partner_id = (SELECT id FROM partner)
       AND so.is_superapp_order = TRUE
-    GROUP BY rc.id, rc.name, rc.merchant, rc.logo_web
+    GROUP BY rc.id, rc.name, rc.merchant, rc.logo_url, rp.image_1920_url
 ),
 total_count AS (
     SELECT COUNT(*) AS c FROM base_companies
@@ -343,7 +357,7 @@ aggregated_results AS (
             'company_id', pc.company_id,
             'company_name', pc.company_name,
             'merchant', pc.merchant,
-            'has_logo', pc.has_logo,
+            'logo_url', pc.logo_url,
             'order_count', pc.order_count,
             'item_count', COALESCE(items.item_count, 0)
         ) ORDER BY pc.order_count DESC, pc.company_name ASC
@@ -362,8 +376,9 @@ aggregated_results AS (
 SELECT
     EXISTS(SELECT 1 FROM partner) AS partner_exists,
     COALESCE((SELECT c FROM total_count), 0) AS total,
-    COALESCE((SELECT results_json FROM aggregated_results), '[]'::json)
+    COALESCE((SELECT results_json FROM aggregated_results), '[]'::json);
 ```
+
 
 
 
@@ -2137,87 +2152,121 @@ LEFT JOIN branch_payload bp
 
 ## Endpoint 22 — GET /api/v1/wishlist/{user_id}
 
-Returns a paginated list of wishlist items for a specific user, including product details, reviews, and active discounts (either direct product discounts or loyalty programs).
+Returns a paginated wishlist for a user. Logic mirrors Odoo `WishlistController.get_wishlist`.
+Product images come from S3 (`product_template.image_1920_url`).
 
-Tables: res_partner, wishlist, product_template, res_company, product_product, product_review, product_discount, loyalty_program, loyalty_reward
+Query params: `page`, `per_page`, `min_price`, `max_price`, `category_id`, `high_to_low`, `order`
+
+Tables: `res_partner`, `wishlist`, `product_template`, `res_company`, `product_product`, `product_review`, `product_discount`, `loyalty_program`, `loyalty_reward`
+
+Parameters:
+  $1 — app_user_id (path)
+  $2 — min_price (default 0)
+  $3 — max_price (default 10000000)
+  $4 — category_id (optional)
+  $N — per_page, $N+1 — offset
+
+### Partner existence check (when no rows returned)
 
 ```sql
--- 1. Partner Resolution
-SELECT id FROM res_partner WHERE app_user_id = $1 LIMIT 1;
+SELECT EXISTS(SELECT 1 FROM res_partner WHERE app_user_id = $1);
+```
 
--- 2. Total Count
-SELECT COUNT(*) 
-FROM wishlist wl
-JOIN product_template pt ON pt.id = wl.product_id
-LEFT JOIN res_company rc  ON rc.id = pt.company_id
-WHERE wl.user_id = $1
-  AND wl.is_active = TRUE
-  AND rc.cps_enabled = TRUE
-  AND wl.ecommerce_float_price >= $2
-  AND wl.ecommerce_float_price <= $3
-  -- AND pt.ecomerce_category_id = $4 (if category_id provided)
-;
+Logic:
+  - Partner missing → 404 User not found
+  - Partner exists but no matching wishlist rows → 404 Wishlist not found
 
--- 3. Main Query
-WITH base AS (
+### Main query
+
+```sql
+WITH partner AS (
+    SELECT id FROM res_partner WHERE app_user_id = $1 LIMIT 1
+),
+filtered AS (
     SELECT
         wl.id,
-        pt.id                                                         AS product_id,
-        COALESCE(pt.name->>'en_US', pt.name::text)                    AS name,
-        wl.ecommerce_float_price                                      AS price,
-        COALESCE(rc.merchant, '')                                     AS merchant,
-        pt.company_id
-    FROM wishlist wl
-    JOIN product_template pt ON pt.id = wl.product_id
+        pt.id                                        AS product_id,
+        COALESCE(pt.name->>'en_US', pt.name::text)   AS name,
+        wl.ecommerce_float_price                     AS price,
+        pt.company_id,
+        COALESCE(pt.image_1920_url, '')              AS product_image
+    FROM partner
+    JOIN wishlist wl          ON wl.user_id = partner.id
+    JOIN product_template pt  ON pt.id = wl.product_id
     LEFT JOIN res_company rc  ON rc.id = pt.company_id
-    WHERE wl.user_id = $1
+    WHERE wl.user_id = partner.id
       AND wl.is_active = TRUE
       AND rc.cps_enabled = TRUE
       AND wl.ecommerce_float_price >= $2
       AND wl.ecommerce_float_price <= $3
-      -- AND pt.ecomerce_category_id = $4
-    ORDER BY wl.id DESC -- or wl.ecommerce_float_price ASC/DESC
-    LIMIT $4 OFFSET $5
+      -- AND pt.ecomerce_category_id = $4           -- when category_id > 0
+),
+base AS (
+    SELECT
+        f.*,
+        COUNT(*) OVER() AS total_count
+    FROM filtered f
+    ORDER BY id DESC   -- or ecommerce_float_price ASC/DESC via high_to_low / order params
+    LIMIT $N OFFSET $M
 )
 SELECT
+    COALESCE(b.total_count, 0)::int          AS total_count,
     b.id,
     b.product_id,
     b.name,
-    rev.avg_rating,
+    COALESCE(rev.avg_rating, 0.0)::numeric   AS avg_rating,
     rev.total_review,
-    
     (
         SELECT COUNT(*) FROM product_product pp
         WHERE pp.product_tmpl_id = b.product_id AND pp.active = TRUE
-    ) AS total_variants,
-    
+    )                                        AS total_variants,
     b.price,
-    b.merchant,
-    COALESCE(disc.discount_sum, loy.discount_sum)     AS discounts,
-    COALESCE(disc.discount_json, loy.discount_json)   AS loyalty_programs
-    
+    b.product_image,
+    CASE
+        WHEN disc_all.discount_sum IS NOT NULL
+          OR (COALESCE(disc_listed.cnt, 0) = 0 AND loy.discount_sum IS NOT NULL)
+        THEN COALESCE(disc_all.discount_sum, 0)
+           + CASE WHEN COALESCE(disc_listed.cnt, 0) = 0
+                  THEN COALESCE(loy.discount_sum, 0)
+                  ELSE 0 END
+        ELSE NULL
+    END                                      AS discounts,
+    COALESCE(disc_listed.discount_json, loy.discount_json) AS loyalty_programs
 FROM base b
 
 LEFT JOIN LATERAL (
-    SELECT 
-        AVG(pr.rating::numeric) AS avg_rating, 
-        COUNT(pr.id)            AS total_review
-    FROM product_review pr 
+    SELECT
+        AVG(NULLIF(pr.rating, '')::numeric) AS avg_rating,
+        COUNT(pr.id) AS total_review
+    FROM product_review pr
     WHERE pr.product_template = b.product_id
 ) rev ON true
 
+-- Odoo loop 1: sum all approved discounts (company_id NOT required)
 LEFT JOIN LATERAL (
-    SELECT 
+    SELECT
         SUM(
             CASE WHEN d.discount_type = 'percentage'
                 THEN ROUND((b.price - (b.price * d.discount_value / 100))::numeric, 2)
                 ELSE ROUND((b.price - d.discount_value)::numeric, 2)
             END
-        ) AS discount_sum,
+        ) AS discount_sum
+    FROM product_discount d
+    WHERE d.product_tmpl_id = b.product_id
+      AND d.is_active = TRUE
+      AND d.x_superapp_approval_status = 'approved'
+      AND (d.start_date IS NULL OR d.start_date <= CURRENT_DATE)
+      AND (d.end_date   IS NULL OR d.end_date   >= CURRENT_DATE)
+) disc_all ON true
+
+-- Odoo loop 2: list only discounts that have company_id
+LEFT JOIN LATERAL (
+    SELECT
+        COUNT(*)::int AS cnt,
         json_agg(json_build_object(
             'name',           d.name,
             'discount_type',  INITCAP(d.discount_type),
-            'discount_value', CASE WHEN d.discount_value = FLOOR(d.discount_value) THEN d.discount_value::text || '.0' ELSE d.discount_value::text END,
+            'discount_value', d.discount_value::text,
             'start_date',     TO_CHAR(d.start_date, 'DD/MM/YY'),
             'end_date',       TO_CHAR(d.end_date, 'DD/MM/YY')
         )) AS discount_json
@@ -2228,10 +2277,11 @@ LEFT JOIN LATERAL (
       AND d.x_superapp_approval_status = 'approved'
       AND (d.start_date IS NULL OR d.start_date <= CURRENT_DATE)
       AND (d.end_date   IS NULL OR d.end_date   >= CURRENT_DATE)
-) disc ON true
+) disc_listed ON true
 
+-- Odoo loyalty fallback: only when company-discount list is empty; first program only
 LEFT JOIN LATERAL (
-    SELECT 
+    SELECT
         SUM(
             ROUND((
                 CASE WHEN lr.discount_mode = 'percent'
@@ -2243,23 +2293,36 @@ LEFT JOIN LATERAL (
         json_agg(json_build_object(
             'name',           lp.name->>'en_US',
             'discount_type',  CASE WHEN lr.discount_mode = 'percent' THEN 'Percentage' ELSE INITCAP(lr.discount_mode) END,
-            'discount_value', CASE WHEN lr.discount = FLOOR(lr.discount) THEN lr.discount::text || '.0' ELSE lr.discount::text END,
+            'discount_value', lr.discount::text,
             'start_date',     TO_CHAR(lp.date_from, 'DD/MM/YY'),
             'end_date',       TO_CHAR(lp.date_to, 'DD/MM/YY')
         )) AS discount_json
     FROM loyalty_program lp
     JOIN loyalty_reward lr ON lr.program_id = lp.id
-    WHERE lp.company_id = b.company_id
-      AND lp.is_ecommerce = TRUE
-      AND lp.x_superapp_approval_status = 'approved'
-      AND (lp.date_from IS NULL OR lp.date_from <= CURRENT_DATE)
-      AND (lp.date_to   IS NULL OR lp.date_to   >= CURRENT_DATE)
-      AND disc.discount_sum IS NULL
+    WHERE COALESCE(disc_listed.cnt, 0) = 0
+      AND lp.id = (
+          SELECT lp2.id
+          FROM loyalty_program lp2
+          WHERE lp2.company_id = b.company_id
+            AND lp2.is_ecommerce = TRUE
+            AND lp2.x_superapp_approval_status = 'approved'
+            AND (lp2.date_from IS NULL OR lp2.date_from <= CURRENT_DATE)
+            AND (lp2.date_to   IS NULL OR lp2.date_to   >= CURRENT_DATE)
+          ORDER BY lp2.id
+          LIMIT 1
+      )
 ) loy ON true
 
-ORDER BY b.id DESC -- or b.price ASC/DESC
-;
+ORDER BY b.id DESC;   -- outer order mirrors pagination sort
 ```
+
+Discount logic (Odoo parity):
+  - `disc_all` sums all active approved product discounts.
+  - `disc_listed` builds the `loyalty_programs` JSON from discounts that have `company_id`.
+  - If `disc_listed` is empty, loyalty program rewards are used instead (`loy`, `LIMIT 1` program).
+  - Final `discounts` = product-discount sum + loyalty sum when the listed discount list is empty.
+
+---
 
 
 ## Endpoint 23 — GET /api/v1/driver/orders
