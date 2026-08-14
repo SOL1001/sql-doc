@@ -1973,6 +1973,8 @@ branch_payload AS (
                 'id', b.id,
                 'name', b.name,
                 'branch_id', b.merchant,
+                'logo', b.logo_url,
+				'banner', b.banner_url,
                 'is_featured',COALESCE(b.is_featured, FALSE),
                 'business_type',bbt.code,
                 'opening_time',
