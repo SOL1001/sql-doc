@@ -2312,39 +2312,69 @@ OFFSET %s --0;
 ## Endpoint 26 — GET /api/v1/categories
 
 ```sql
+
+
 WITH params AS (
     SELECT
-        'http://localhost:8062'::text AS base_url,
-        1::int AS page,
-        10::int AS per_page
+        NULL::int AS page,
+        NULL::int AS per_page
 ),
-roots AS (
-    SELECT c.*
+
+request_params AS (
+    SELECT
+        p.*,
+        CASE
+            WHEN p.page IS NULL OR p.per_page IS NULL
+                THEN NULL
+            ELSE (p.page - 1) * p.per_page
+        END AS requested_offset
+    FROM params p
+),
+
+active_categories AS (
+    SELECT
+        c.id,
+        c.name,
+        c.image_1_url,
+        c.category_banner_url,
+        c.product_count,
+        c.description
     FROM product_ecomerce_categories c
     WHERE c.parent_id IS NULL
       AND c.active IS TRUE
-    ORDER BY c.id  
-    LIMIT (SELECT per_page FROM params)
-    OFFSET (SELECT (page - 1) * per_page FROM params)
 ),
 
 total_count AS (
     SELECT COUNT(*)::int AS total
-    FROM product_ecomerce_categories c
-    WHERE c.parent_id IS NULL
-      AND c.active IS TRUE
-)
+    FROM active_categories
+),
 
+paged_categories AS (
+    SELECT
+        c.*
+    FROM active_categories c
+    ORDER BY c.id
+    LIMIT (
+        SELECT per_page
+        FROM request_params
+    )
+    OFFSET (
+        SELECT COALESCE(requested_offset, 0)
+        FROM request_params
+    )
+)
 SELECT
-    r.id,
-    r.name,
-    CASE WHEN r.has_image THEN p.base_url || '/api/v1/category/image/' || r.id ELSE NULL END AS image,
-    CASE WHEN r.has_banner THEN p.base_url || '/api/v1/category/banner/' || r.id ELSE NULL END AS banner,
-    COALESCE(r.product_count, 0) AS items,
-    r.description
-FROM params p
-JOIN roots r ON TRUE
-ORDER BY r.id;
+    c.id,
+    c.name,
+    NULLIF(c.image_1_url, '') AS image,
+    NULLIF(c.category_banner_url, '') AS banner,
+    COALESCE(c.product_count, 0) AS items,
+    c.description,
+    tc.total
+FROM paged_categories c
+CROSS JOIN total_count tc
+ORDER BY c.id;
+
 ```
 
 
