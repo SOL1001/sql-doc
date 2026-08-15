@@ -2382,118 +2382,71 @@ ORDER BY c.id;
 
 ```sql
 WITH params AS (
-    SELECT
-        'http://localhost:8062'::text AS base_url,
-        1::int AS category_id   -- swap in the requested category id
+    SELECT 1::int AS category_id
 ),
 target_category AS (
-    SELECT c.*
+    SELECT
+        c.id,
+        c.name,
+        c.complete_name,
+        c.parent_id,
+        c.image_1_url,
+        c.category_banner_url,
+        c.product_count
     FROM product_ecomerce_categories c
-    JOIN params p ON TRUE
-    WHERE c.id = p.category_id
-      AND c.active IS TRUE
-    LIMIT 1
+    JOIN params p ON p.category_id = c.id
+    WHERE c.active IS TRUE
 ),
 children AS (
-    SELECT ch.*
-    FROM product_ecomerce_categories ch
-    JOIN target_category tc ON tc.id = ch.parent_id
-    WHERE ch.active IS TRUE
+    SELECT
+        c.id,
+        c.name,
+        c.complete_name,
+        c.image_1_url,
+        c.category_banner_url
+    FROM product_ecomerce_categories c
+    JOIN target_category tc ON tc.id = c.parent_id
+    WHERE c.active IS TRUE
 ),
 children_json AS (
     SELECT
-        json_agg(
-            json_build_object(
-                'id', ch.id,
-                'name', COALESCE(ch.name, ''),
-                'complete_name', COALESCE(ch.complete_name, ''),
-                'image',
-                    CASE
-                        WHEN ch.has_image
-                        THEN (SELECT base_url FROM params) || '/api/v1/category/image/' || ch.id
-                        ELSE NULL
-                    END,
-                'banner',
-                    CASE
-                        WHEN ch.has_banner
-                        THEN (SELECT base_url FROM params) || '/api/v1/category/banner/' || ch.id
-                        ELSE NULL
-                    END
-            )
-            ORDER BY ch.id
+        COALESCE(
+            JSONB_AGG(
+                JSONB_BUILD_OBJECT(
+                    'id', c.id,
+                    'name', COALESCE(c.name, ''),
+                    'complete_name', COALESCE(c.complete_name, ''),
+                    'image', NULLIF(c.image_1_url, ''),
+                    'banner', NULLIF(c.category_banner_url, '')
+                )
+                ORDER BY c.id
+            ),
+            '[]'::jsonb
         ) AS children
-    FROM children ch
-),
-parent_companies AS (
-    SELECT c.id
-    FROM res_company c
-    WHERE c.parent_id IS NULL
-      AND c.cps_enabled = true
-      AND COALESCE(c.is_delivery, false) = false
-      AND c.active = true
-      AND c.merchant IS NOT NULL
-      AND c.merchant != ''
-),
-branch_companies AS (
-    SELECT c.id
-    FROM res_company c
-    JOIN parent_companies pc ON pc.id = c.parent_id
-    WHERE c.cps_enabled = true
-      AND COALESCE(c.is_delivery, false) = false
-      AND c.active = true
-      AND c.merchant IS NOT NULL
-      AND c.merchant != ''
-),
-allowed_companies AS (
-    SELECT id FROM parent_companies
-    UNION
-    SELECT id FROM branch_companies
-),
-product_count AS (
-    SELECT COUNT(*)::int AS items
-    FROM product_template pt
-    JOIN target_category tc ON tc.id = pt.ecomerce_category_id
-    WHERE pt.active IS TRUE
-      AND pt.is_for_ecommerce IS TRUE
-      AND pt.x_superapp_approval_status = 'approved'
-      AND pt.company_id IN (SELECT id FROM allowed_companies)
+    FROM children c
 )
 SELECT
     tc.id,
     COALESCE(tc.name, '') AS name,
+    NULLIF(tc.image_1_url, '') AS image,
     CASE
-        WHEN tc.has_image
-        THEN (SELECT base_url FROM params) || '/api/v1/category/image/' || tc.id
-        ELSE 'False'
-    END AS image,
-
-    CASE
-        WHEN tc.parent_id IS NOT NULL
-        THEN json_build_object(
+        WHEN tc.parent_id IS NOT NULL THEN
+            JSONB_BUILD_OBJECT(
                 'id', parent.id,
                 'name', COALESCE(parent.name, ''),
                 'complete_name', COALESCE(parent.complete_name, ''),
-                'image',
-                    CASE
-                        WHEN parent.has_image
-                        THEN (SELECT base_url FROM params) || '/api/v1/category/image/' || parent.id
-                        ELSE NULL
-                    END
-             )
+                'image', NULLIF(parent.image_1_url, ''),
+                'banner', NULLIF(parent.category_banner_url, '')
+            )
         ELSE NULL
     END AS parent_category,
-
-    COALESCE(cj.children, '[]'::json) AS child_categories,
+    cj.children AS child_categories,
     (SELECT COUNT(*)::int FROM children) AS child_count,
-    COALESCE(pcnt.items, 0) AS items
-
+    COALESCE(tc.product_count, 0) AS items
 FROM target_category tc
-LEFT JOIN product_ecomerce_categories parent ON parent.id = tc.parent_id
-LEFT JOIN children_json cj ON TRUE
-CROSS JOIN product_count pcnt;
-
-
-
+LEFT JOIN product_ecomerce_categories parent
+    ON parent.id = tc.parent_id
+CROSS JOIN children_json cj;
 
 ```
 
