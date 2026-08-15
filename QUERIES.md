@@ -2382,7 +2382,7 @@ ORDER BY c.id;
 
 ```sql
 WITH params AS (
-    SELECT 1::int AS category_id
+    SELECT NULL::int AS category_id
 ),
 target_category AS (
     SELECT
