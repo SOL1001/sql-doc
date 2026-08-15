@@ -491,7 +491,7 @@ SELECT
     pt.sold_count || ' ' || (uom.name->>'en_US') AS total_sold_qty,
     pt.ecommerce_float_price AS list_price,
     rcur.name AS currency,
-    icp.value || '/api/v1/image/product.template/' || pt.id || '/image_1920' AS image,
+    pt.image_1920_url AS image,
     pt.average_rating,
    
     COALESCE(pp_count.total_variants, 0) AS total_variants,
@@ -605,7 +605,7 @@ SELECT
     pt.sold_count || ' ' || (uom.name->>'en_US') AS total_sold_qty,
     pt.ecommerce_float_price AS list_price,
     rcur.name AS currency,
-    icp.value || '/api/v1/image/product.template/' || pt.id || '/image_1920' AS image,
+    pt.image_1920_url AS image,
     pt.average_rating,
    
     COALESCE(pp_count.total_variants, 0) AS total_variants,
@@ -720,7 +720,7 @@ SELECT
     pt.sold_count || ' ' || (uom.name->>'en_US') AS total_sold_qty,
     pt.ecommerce_float_price AS list_price,
     rcur.name AS currency,
-    icp.value || '/api/v1/image/product.template/' || pt.id || '/image_1920' AS image,
+    pt.image_1920_url AS image,
     pt.average_rating,
    
     COALESCE(pp_count.total_variants, 0) AS total_variants,
@@ -833,7 +833,7 @@ pec.id AS category_id,
 pec.name AS category_name,
 pec.superapp_sale_count AS total_sold_qty,
 COUNT(pt.id) AS product_count,
-pec.image_url
+pec.image_1_url
 FROM product_ecomerce_categories pec LEFT JOIN product_template pt ON pt.ecomerce_category_id = pec.id
 GROUP BY pec.id,pec.name,pec.superapp_sale_count
 OFFSET %s --0
@@ -859,7 +859,7 @@ SELECT
         )
     ) AS product_count,
     COUNT(sol.id) AS total_sold_qty,
-    pec.image_url AS image
+    pec.image_1_url AS image
 FROM sale_order_line sol
 LEFT JOIN product_ecomerce_categories pec
     ON sol.category_id = pec.id
@@ -876,7 +876,7 @@ WHERE
 GROUP BY
     pec.id,
     pec.name,
-    pec.image_url,
+    pec.image_1_url,
     rc.id
 ORDER BY
     COUNT(sol.id) DESC
@@ -1092,7 +1092,7 @@ SELECT json_build_object(
                     pec.id,
                     pec.name,
                     pec.complete_name,
-                    pec.image_url
+                    pec.image_1_url
 
                 FROM product_ecomerce_categories pec
 
@@ -1113,7 +1113,7 @@ SELECT json_build_object(
 SELECT 
 pt.id,pt.name->>'en_US' AS name,
 pt.ecommerce_float_price AS list_price,
-icp.value || '/api/v1/image/product.template/' || pt.id || '/image_1920' AS image_url,
+pt.image_1920_url AS image_url,
 pt.average_rating,
 COUNT(pr.id) AS total_reviews,
 json_build_object (
@@ -1141,7 +1141,7 @@ GROUP BY pt.id,icp.value,rc.id;
 SELECT pec.id,
        pec.name,
        pec.complete_name,
-       pec.image_url,
+       pec.image_1_url,
        COUNT(pt.id) AS items
 FROM product_ecomerce_categories pec
     LEFT JOIN product_template pt ON pt.ecomerce_category_id = pec.id 
@@ -2332,7 +2332,7 @@ SELECT
 dop.delivery_notes AS additional_note,
 	json_agg(
 json_build_object(
-'id',pt.id,'name',pt.name->>'en_US','image',icp.value || '/api/v1/image/product.template/' || pt.id || '/image_1920',
+'id',pt.id,'name',pt.name->>'en_US','image',pt.image_1920_url,
 'qunatity',dol.quantity,'uom',uom.name->>'en_US','description',dol.description
 )
 	) AS items
