@@ -483,7 +483,8 @@ paged_products AS (
         pt.average_rating,
         COALESCE(pt.product_variant_count, 0) AS total_variants,
         c.merchant,
-        c.name AS merchant_name
+        c.name AS merchant_name,
+		COUNT(*) OVER() AS total
     FROM product_template pt
     JOIN res_company c
         ON c.id = pt.company_id
@@ -778,11 +779,14 @@ SELECT
     COALESCE(fp.t_is_featured, FALSE) AS is_featured,
     COALESCE(fp.is_halal, FALSE) AS is_halal,
     COALESCE(fp.is_arrival, FALSE) AS is_arrival,
-    fp.is_wishlisted
+    fp.is_wishlisted,
+	fp.total
 FROM final_products fp
 ORDER BY
     fp.sold_count DESC,
     fp.product_id DESC;
+
+
 ```
 
 ## Endpoint 11 — GET /api/v1/{merchant:string}/popular_merchant_products
@@ -792,7 +796,7 @@ ORDER BY
 
 WITH params AS (
     SELECT
-        'MRT000001SPR'::text AS merchant,
+        'MRT000001SPR'::text AS merchant, -- mandatory merchant 
         NULL::int AS category_id,
         NULL::numeric AS min_price,
         NULL::numeric AS max_price,
@@ -819,7 +823,8 @@ paged_products AS (
         pt.average_rating,
         COALESCE(pt.product_variant_count, 0) AS total_variants,
         c.merchant,
-        c.name AS merchant_name
+        c.name AS merchant_name,
+		COUNT(*) OVER() AS total
     FROM params p
     JOIN res_company c
       ON c.merchant = p.merchant
@@ -1146,11 +1151,13 @@ SELECT
     COALESCE(fp.t_is_featured, FALSE) AS is_featured,
     COALESCE(fp.is_halal, FALSE) AS is_halal,
     COALESCE(fp.is_arrival, FALSE) AS is_arrival,
-    fp.is_wishlisted
+    fp.is_wishlisted,
+	fp.total
 FROM final_products fp
 ORDER BY
     fp.sold_count DESC,
     fp.product_id DESC;
+
 ```
 
 
@@ -1159,8 +1166,8 @@ ORDER BY
 ```sql
 WITH params AS (
     SELECT
-        'MRT000001SPR'::text AS merchant, -- mandatory merchant id 
-        1::int AS category_id, -- mandatory catagory id
+        'MRT000001SPR'::text AS merchant, -- mandatory merchant id from url
+        1::int AS category_id, -- mandatory catagory id from url 
         NULL::numeric AS min_price,
         NULL::numeric AS max_price,
         NULL::boolean AS is_halal,
@@ -1186,7 +1193,8 @@ paged_products AS (
         pt.average_rating,
         COALESCE(pt.product_variant_count, 0) AS total_variants,
         c.merchant,
-        c.name AS merchant_name
+        c.name AS merchant_name,
+		COUNT(*) OVER() AS total
     FROM params p
     JOIN res_company c
       ON c.merchant = p.merchant
@@ -1453,11 +1461,13 @@ SELECT
     COALESCE(fp.t_is_featured, FALSE) AS is_featured,
     COALESCE(fp.is_halal, FALSE) AS is_halal,
     COALESCE(fp.is_arrival, FALSE) AS is_arrival,
-    fp.is_wishlisted
+    fp.is_wishlisted,
+	fp.total
 FROM final_products fp
 ORDER BY
     fp.sold_count DESC,
     fp.product_id DESC;
+
 ```
 
 ## Endpoint 13 — GET /api/v1/popular_categories
