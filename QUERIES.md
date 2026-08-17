@@ -1157,116 +1157,307 @@ ORDER BY
 ## Endpoint 12 — GET /api/v1/{merchant:string}/popular_merchant_products/category/{category_id:int}
 
 ```sql
-SELECT 
-    pt.id AS product_id,
-    pt.name->>'en_US' AS product_name,
-    pt.description_sale AS description,
-    pt.sold_count || ' ' || (uom.name->>'en_US') AS total_sold_qty,
-    pt.ecommerce_float_price AS list_price,
-    rcur.name AS currency,
-    pt.image_1920_url AS image,
-    pt.average_rating,
-   
-    COALESCE(pp_count.total_variants, 0) AS total_variants,
-
-    pt.t_is_featured AS is_featured,
-    pt.is_halal,
-    pt.is_arrival,
-
-    EXISTS (
-        SELECT 1
-        FROM product_template_res_partner_rel ptr
-        WHERE ptr.product_template_id = pt.id
-        AND ptr.res_partner_id = rp.id
-    ) AS is_wishlisted,
-
-    COALESCE(discount_data.discounts, '[]'::json) AS discount,
-    COALESCE(discount_data.product_discounts, 0) AS product_discounts
-
-FROM product_template pt
-
-LEFT JOIN res_company rc  
-    ON rc.id = pt.company_id
-
-LEFT JOIN res_partner rp
-    ON rp.app_user_id =  %s--'51a0769721cb5557e0630b6f030a1579'
-
-LEFT JOIN uom_uom uom
-    ON uom.id = pt.uom_id
-
-LEFT JOIN res_currency rcur 
-    ON rcur.id = rc.currency_id
-
-
-LEFT JOIN (
-    SELECT 
-        product_tmpl_id,
-        COUNT(id) AS total_variants
-    FROM product_product
-    GROUP BY product_tmpl_id
-) pp_count
-    ON pp_count.product_tmpl_id = pt.id
-
-
-LEFT JOIN LATERAL (
+WITH params AS (
     SELECT
-        json_agg(
-            json_build_object(
-                'name', d.name,
-                'discount_type', d.discount_type,
-                'discount_value', d.discount_value,
-                'start_date', d.start_date,
-                'end_date', d.end_date
+        'MRT000001SPR'::text AS merchant, -- mandatory merchant id 
+        1::int AS category_id, -- mandatory catagory id
+        NULL::numeric AS min_price,
+        NULL::numeric AS max_price,
+        NULL::boolean AS is_halal,
+        NULL::text AS app_user_id,
+        NULL::text AS sort_order,
+        1::int AS page,
+        10::int AS per_page,
+        50::int AS max_limit
+),
+paged_products AS (
+    SELECT
+        pt.id AS product_id,
+        pt.name AS product_name_raw,
+        pt.description_sale AS description_raw,
+        pt.company_id,
+        pt.sold_count,
+        pt.ecommerce_float_price,
+        pt.image_1920_url,
+        pt.t_is_featured,
+        pt.is_halal,
+        pt.is_arrival,
+        pt.total_reviews,
+        pt.average_rating,
+        COALESCE(pt.product_variant_count, 0) AS total_variants,
+        c.merchant,
+        c.name AS merchant_name
+    FROM params p
+    JOIN res_company c
+      ON c.merchant = p.merchant
+     AND c.cps_enabled IS TRUE
+     AND COALESCE(c.is_delivery, FALSE) IS FALSE
+     AND c.active IS TRUE
+     AND NULLIF(TRIM(c.merchant), '') IS NOT NULL
+     AND (
+            c.parent_id IS NULL
+            OR EXISTS (
+                SELECT 1
+                FROM res_company parent
+                WHERE parent.id = c.parent_id
+                  AND parent.parent_id IS NULL
+                  AND parent.cps_enabled IS TRUE
+                  AND COALESCE(parent.is_delivery, FALSE) IS FALSE
+                  AND parent.active IS TRUE
+                  AND NULLIF(TRIM(parent.merchant), '') IS NOT NULL
             )
-        ) FILTER (WHERE d.id IS NOT NULL AND d.is_active = true) AS discounts,
-
-        COALESCE(
-            SUM(
-                CASE
-                    WHEN d.discount_type IN ('percentage', 'percent')
-                        THEN ROUND(
-                            (
-                                pt.ecommerce_float_price::numeric *
-                                (d.discount_value::numeric / 100)
+        )
+    JOIN product_template pt
+      ON pt.company_id = c.id
+     AND pt.active IS TRUE
+     AND pt.is_for_ecommerce IS TRUE
+     AND pt.x_superapp_approval_status = 'approved'
+     AND pt.sold_count > 0
+     AND pt.is_in_stock IS TRUE
+     AND pt.ecomerce_category_id = p.category_id
+    WHERE
+        (p.min_price IS NULL OR pt.ecommerce_float_price >= p.min_price)
+        AND (p.max_price IS NULL OR pt.ecommerce_float_price <= p.max_price)
+        AND (p.is_halal IS NULL OR COALESCE(pt.is_halal, FALSE) = p.is_halal)
+    ORDER BY
+        CASE
+            WHEN p.sort_order = 'asc' THEN pt.sold_count
+        END ASC,
+        CASE
+            WHEN p.sort_order IS NULL OR p.sort_order = 'desc'
+                THEN pt.sold_count
+        END DESC,
+        pt.id DESC
+    LIMIT (
+        SELECT LEAST(GREATEST(per_page, 1), max_limit)
+        FROM params
+    )
+    OFFSET (
+        SELECT GREATEST(page - 1, 0)
+             * LEAST(GREATEST(per_page, 1), max_limit)
+        FROM params
+    )
+),
+discount_data AS (
+    SELECT
+        pp.product_id,
+        JSONB_AGG(
+            JSONB_BUILD_OBJECT(
+                'name', NULLIF(TRIM(pd.name), ''),
+                'discount_type',
+                    CASE
+                        WHEN pd.discount_type IS NULL THEN NULL
+                        WHEN pd.discount_type = 'percentage' THEN 'Percentage'
+                        ELSE INITCAP(pd.discount_type)
+                    END,
+                'discount_value', pd.discount_value::text,
+                'start_date',
+                    CASE
+                        WHEN pd.start_date IS NULL THEN NULL
+                        ELSE TO_CHAR(pd.start_date, 'DD/MM/YY')
+                    END,
+                'end_date',
+                    CASE
+                        WHEN pd.end_date IS NULL THEN NULL
+                        ELSE TO_CHAR(pd.end_date, 'DD/MM/YY')
+                    END
+            )
+            ORDER BY pd.id
+        ) AS discount,
+        MIN(
+            CASE
+                WHEN pd.discount_type = 'percentage' THEN
+                    TRUNC(
+                        GREATEST(
+                            pp.ecommerce_float_price
+                            - (
+                                pp.ecommerce_float_price
+                                * pd.discount_value / 100
                             ),
-                            2
-                        )
-                    ELSE
-                        ROUND(
-                            d.discount_value::numeric,
-                            2
-                        )
-                END
-            ) FILTER (
-                WHERE d.id IS NOT NULL
-                AND d.is_active = true
-            ),
-            0
+                            0
+                        )::numeric,
+                        2
+                    )
+                ELSE
+                    TRUNC(
+                        GREATEST(
+                            pp.ecommerce_float_price - pd.discount_value,
+                            0
+                        )::numeric,
+                        2
+                    )
+            END
         ) AS product_discounts
-
-
-    FROM product_discount d
-    WHERE d.product_tmpl_id = pt.id
-
-) discount_data ON TRUE
-
-
-CROSS JOIN ir_config_parameter icp
-
-WHERE 
-    icp.key = 'image.base.url'
-    AND pec.id = %s -- 1
-    AND rc.cps_enabled = true
-	AND rc.is_delivery = false
-	AND rc.active = true
-	AND rc.merchant = %S --'MRT000001SPR'
-    AND pt.x_superapp_approval_status = 'approved'
-    AND pt.sold_count > 0
-    AND rc.cps_enabled = true
-    AND pt.ecommerce_float_price >= $s -- 0 
-    AND pt.ecommerce_float_price <= %s --1000
-    AND pt.is_in_stock = true
-	OFFSET %s LIMIT %s;
+    FROM paged_products pp
+    JOIN product_discount pd
+      ON pd.product_tmpl_id = pp.product_id
+     AND pd.is_active IS TRUE
+     AND pd.x_superapp_approval_status = 'approved'
+     AND (pd.start_date IS NULL OR pd.start_date <= CURRENT_DATE)
+     AND (pd.end_date IS NULL OR pd.end_date >= CURRENT_DATE)
+    GROUP BY pp.product_id
+),
+loyalty_programs AS (
+    SELECT DISTINCT ON (lp.company_id)
+        lp.id,
+        lp.company_id,
+        lp.name,
+        lp.date_from,
+        lp.date_to
+    FROM loyalty_program lp
+    WHERE
+        lp.program_type = 'promotion'
+        AND lp.is_ecommerce IS TRUE
+        AND lp.x_superapp_approval_status = 'approved'
+        AND lp.company_id IS NOT NULL
+        AND (lp.date_from IS NULL OR lp.date_from <= CURRENT_DATE)
+        AND (lp.date_to IS NULL OR lp.date_to >= CURRENT_DATE)
+        AND EXISTS (
+            SELECT 1
+            FROM paged_products pp
+            WHERE pp.company_id = lp.company_id
+        )
+    ORDER BY lp.company_id, lp.id
+),
+loyalty_discount_data AS (
+    SELECT
+        pp.product_id,
+        JSONB_AGG(
+            JSONB_BUILD_OBJECT(
+                'name',
+                    NULLIF(
+                        CASE
+                            WHEN jsonb_typeof(lp.name::jsonb) = 'object'
+                                THEN lp.name::jsonb ->> 'en_US'
+                            ELSE lp.name::text
+                        END,
+                        ''
+                    ),
+                'discount_type',
+                    CASE
+                        WHEN lr.discount_mode = 'percent' THEN 'Percentage'
+                        ELSE INITCAP(lr.discount_mode)
+                    END,
+                'discount_value',
+                    CASE
+                        WHEN lr.discount IS NULL THEN NULL
+                        ELSE lr.discount::text
+                    END,
+                'start_date',
+                    CASE
+                        WHEN lp.date_from IS NULL THEN NULL
+                        ELSE TO_CHAR(lp.date_from, 'DD/MM/YY')
+                    END,
+                'end_date',
+                    CASE
+                        WHEN lp.date_to IS NULL THEN NULL
+                        ELSE TO_CHAR(lp.date_to, 'DD/MM/YY')
+                    END
+            )
+            ORDER BY lr.id
+        ) AS discount,
+        MIN(
+            CASE
+                WHEN lr.discount_mode = 'percent' THEN
+                    TRUNC(
+                        GREATEST(
+                            pp.ecommerce_float_price
+                            - (
+                                pp.ecommerce_float_price
+                                * lr.discount / 100
+                            ),
+                            0
+                        )::numeric,
+                        2
+                    )
+                ELSE
+                    TRUNC(
+                        GREATEST(
+                            pp.ecommerce_float_price - lr.discount,
+                            0
+                        )::numeric,
+                        2
+                    )
+            END
+        ) AS product_discounts
+    FROM paged_products pp
+    JOIN loyalty_programs lp
+      ON lp.company_id = pp.company_id
+    JOIN loyalty_reward lr
+      ON lr.program_id = lp.id
+    GROUP BY pp.product_id
+),
+wishlist_products AS (
+    SELECT DISTINCT
+        pp.product_tmpl_id
+    FROM params p
+    JOIN res_partner rp
+      ON rp.app_user_id = p.app_user_id
+    JOIN wishlist wl
+      ON wl.user_id = rp.id
+     AND wl.is_active IS TRUE
+    JOIN product_product pp
+      ON pp.id = wl.product_id
+    WHERE p.app_user_id IS NOT NULL
+),
+final_products AS (
+    SELECT
+        pp.*,
+        CASE
+            WHEN dd.discount IS NOT NULL THEN dd.discount
+            WHEN ld.discount IS NOT NULL THEN ld.discount
+            ELSE '[]'::jsonb
+        END AS discount,
+        CASE
+            WHEN dd.discount IS NOT NULL THEN COALESCE(dd.product_discounts, 0)
+            WHEN ld.discount IS NOT NULL THEN COALESCE(ld.product_discounts, 0)
+            ELSE 0
+        END AS product_discounts,
+        EXISTS (
+            SELECT 1
+            FROM wishlist_products wp
+            WHERE wp.product_tmpl_id = pp.product_id
+        ) AS is_wishlisted
+    FROM paged_products pp
+    LEFT JOIN discount_data dd
+      ON dd.product_id = pp.product_id
+    LEFT JOIN loyalty_discount_data ld
+      ON ld.product_id = pp.product_id
+)
+SELECT
+    fp.product_id,
+    CASE
+        WHEN fp.product_name_raw IS NULL THEN NULL
+        WHEN jsonb_typeof(fp.product_name_raw::jsonb) = 'object'
+            THEN COALESCE(
+                fp.product_name_raw::jsonb ->> 'en_US',
+                fp.product_name_raw::text
+            )
+        ELSE fp.product_name_raw::text
+    END AS product_name,
+    CASE
+        WHEN fp.description_raw IS NULL THEN NULL
+        WHEN jsonb_typeof(fp.description_raw::jsonb) = 'object'
+            THEN fp.description_raw::jsonb ->> 'en_US'
+        ELSE fp.description_raw::text
+    END AS description,
+    CONCAT(COALESCE(fp.sold_count, 0), ' Units') AS total_sold_qty,
+    fp.ecommerce_float_price AS list_price,
+    'ETB' AS currency,
+    COALESCE(fp.product_discounts, 0) AS product_discounts,
+    COALESCE(fp.discount, '[]'::jsonb) AS discount,
+    NULLIF(fp.image_1920_url, '') AS image,
+    COALESCE(fp.total_reviews, 0) AS total_review,
+    COALESCE(fp.average_rating, 0.0) AS average_rating,
+    COALESCE(fp.total_variants, 0) AS tototal_variants,
+    COALESCE(fp.t_is_featured, FALSE) AS is_featured,
+    COALESCE(fp.is_halal, FALSE) AS is_halal,
+    COALESCE(fp.is_arrival, FALSE) AS is_arrival,
+    fp.is_wishlisted
+FROM final_products fp
+ORDER BY
+    fp.sold_count DESC,
+    fp.product_id DESC;
 ```
 
 ## Endpoint 13 — GET /api/v1/popular_categories
