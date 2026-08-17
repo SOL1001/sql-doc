@@ -1,5 +1,4 @@
 # SQL Queries Reference
-```ELST```
 
 
 
