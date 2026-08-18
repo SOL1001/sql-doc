@@ -29,7 +29,7 @@ filtered AS (
            ROUND(so.amount_total::numeric, 2) AS total_price, so."deliveryType",
            so.driver_name, so.driver_mobile, so.driver_email, so.driver_delivery_medium,
            rc.id AS company_id, rc.merchant, rc.name AS company_name,
-           NULLIF(TRIM(COALESCE(rc.logo_url, rp.image_1920_url, '')), '') AS logo_url,
+           NULLIF(TRIM(COALESCE(rc.logo_web, rp.image_1920_url, '')), '') AS logo_url,
            rc.lat_location, rc.lng_location, rc.phone AS company_phone,
            rp.street, rp.city, rcs.name AS state_name, rco.name->>'en_US' AS country_name, rcp.name AS parent_name
     FROM input i
@@ -144,7 +144,7 @@ WITH base AS (
         so."deliveryType" AS delivery_type, so.date_order,
         dp.ecommerce_float_price AS delivery_price,
         rc.id AS company_id, rc.name AS company_name, rc.merchant AS company_merchant,
-        NULLIF(TRIM(COALESCE(rc.logo_url, rp.image_1920_url, '')), '') AS logo_url,
+        NULLIF(TRIM(COALESCE(rc.logo_web, rp.image_1920_url, '')), '') AS logo_url,
         rc.lat_location AS lat, rc.lng_location AS lng, rc.phone AS company_phone,
         rp.street, rp.city, rs.name AS state_name, rco.name->>'en_US' AS country_name
     FROM sale_order so
@@ -286,13 +286,13 @@ WITH partner AS (
 ),
 base_companies AS (
     SELECT rc.id AS company_id, rc.name AS company_name, rc.merchant AS merchant,
-           NULLIF(TRIM(COALESCE(rc.logo_url, rp.image_1920_url, '')), '') AS logo_url,
+           NULLIF(TRIM(COALESCE(rc.logo_web, rp.image_1920_url, '')), '') AS logo_url,
            COUNT(so.id) AS order_count
     FROM sale_order so
     JOIN res_company rc ON rc.id = so.company_id
     LEFT JOIN res_partner rp ON rp.id = rc.partner_id
     WHERE so.partner_id = (SELECT id FROM partner) AND so.is_superapp_order = TRUE
-    GROUP BY rc.id, rc.name, rc.merchant, rc.logo_url, rp.image_1920_url
+    GROUP BY rc.id, rc.name, rc.merchant, rc.logo_web, rp.image_1920_url
 ),
 total_count AS (SELECT COUNT(*) AS c FROM base_companies),
 paginated_companies AS (
@@ -346,7 +346,7 @@ LIMIT %s;
 SELECT 
     c.id,
     c.name AS name,
-    c.logo_url,
+    c.logo_web,
     c.merchant
 FROM res_company c
 WHERE c.parent_id IS NULL
@@ -850,7 +850,7 @@ SELECT
 	rc.merchant,
 		cbt.code AS business_type,
 
-	rc.logo_url AS logo,
+	rc.logo_web AS logo,
 	rc.banner_url AS banner,
 	rc.is_featured,
 	rc.email,
@@ -909,7 +909,7 @@ SELECT json_build_object(
                     rc.name,
                     rc.merchant,
                     cbt.code AS business_type,
-                    rc.logo_url AS logo,
+                    rc.logo_web AS logo,
                     rc.banner_url AS banner,
                     rc.is_featured,
                     rc.email,
@@ -947,7 +947,7 @@ SELECT json_build_object(
                     rc.name,
                     rc.merchant,
                     cbt.code,
-                    rc.logo_url,
+                    rc.logo_web,
                     rc.banner_url,
                     rc.is_featured,
                     rc.email,
@@ -999,7 +999,7 @@ SELECT json_build_object(
                         'id', rc.id,
                         'name', rc.name,
                         'merchant', rc.merchant,
-                        'logo', rc.logo_url
+                        'logo', rc.logo_web
                     ) AS company,
 
                     pt.average_rating,
@@ -1073,7 +1073,7 @@ pt.image_1920_url AS image_url,
 pt.average_rating,
 COUNT(pr.id) AS total_reviews,
 json_build_object (
-'id',rc.id,'name',rc.name,'merchant',rc.merchant,'logo',rc.logo_url
+'id',rc.id,'name',rc.name,'merchant',rc.merchant,'logo',rc.logo_web
 ) AS company
 
 FROM product_template pt 
@@ -2196,33 +2196,15 @@ token: from request header `x-token`
 SELECT
     dop.id,
     dop.name AS order_id,
+	iso.superapp_order_status AS status,
     order_comp.logo_url AS logo,
-    order_comp.name AS "from",
-
-    json_build_object(
-        'street', order_partner.street,
-        'city', order_partner.city,
-        'state', rcs.name
-    ) AS pickup_location,
-
-    json_build_object(
-        'images',
-        COALESCE(
-            json_agg(
-                DISTINCT
-                icp.value
-                || '/api/v1/image/product.template/'
-                || pt.id
-                || '/image_1920'
-            ) FILTER (WHERE pt.id IS NOT NULL),
-            '[]'::json
-        ),
-        'number',
-        COUNT(pt.id)
-    ) AS items,
-
-    dop.delivery_date AS "date",
-	dso.superapp_order_status AS status
+	dop_partner.name AS "from",
+	COALESCE(order_partner.street, '') || ', ' || COALESCE(order_partner.city, '') || ' ' || COALESCE(rcs.name, '') AS pickup_location, 
+    to_char(dop.delivery_date, 'MM/DD/YYYY') AS delivery_date,
+json_build_object(
+    'images', json_agg(pt.image_1920_url),
+    'number',  COUNT(dol)
+) AS items
 
 FROM delivery_order dop
 
@@ -2253,11 +2235,11 @@ LEFT JOIN delivery_order_line dol
 LEFT JOIN product_template pt
     ON dol.product_id = pt.id
 LEFT JOIN sale_order dso ON dso.id = dop.so_id
-CROSS JOIN ir_config_parameter icp
+LEFT JOIN sale_order iso ON iso.id = dop.sale_order_id::integer
+
 
 WHERE
-    icp.key = 'image.base.url'
-    AND ru.token =  %s    --'760e9d74bdc5ed81107e62aa4f589c99'
+    ru.token = %s --'112b196a55260038feae474675478dab'
 	AND ru.token_expiration_time > NOW()
  AND dop.state IN ('driver', 'picked')
 GROUP BY
@@ -2269,9 +2251,13 @@ GROUP BY
     order_partner.city,
 	dso.superapp_order_status,
     rcs.name,
-    dop.delivery_date
-LIMIT %s --10
-OFFSET %s --0;
+    dop.delivery_date,
+    dop_partner.name,
+    iso.superapp_order_status
+
+ORDER BY dop.id DESC
+LIMIT %s -- 10
+OFFSET %s -- 0;
 ```
 
 
@@ -2285,20 +2271,30 @@ token: from request header `x-token`
 SELECT
     dop.id,
     dop.name AS ref_no,
-	dso.superapp_order_status AS status,
-    order_comp.logo_url AS logo,
-	COALESCE(order_partner.street, '') || ', ' || COALESCE(order_partner.city, '') || ' ' || COALESCE(rcs.name, '') AS pickup_from, 
-    dop.delivery_date,
+	iso.superapp_order_status AS status,
+json_build_object(
+    'id', order_comp.id,
+    'name', order_comp.name,
+    'logo', order_comp.logo_url,
+    'phone', order_comp.phone
+) AS pickup_from,
+	COALESCE(order_partner.street, '') || ', ' || COALESCE(order_partner.city, '') || ' ' || COALESCE(rcs.name, '') AS pickup_location, 
+   to_char(dop.delivery_date, 'MM/DD/YYYY') AS delivery_date,
 	dop.delivery_pickup_code,
-	customer.name AS customer_info,
-	json_build_object (
+		json_build_object (
 'lat',dop.delivery_lat,'lng',dop.delivery_long
 	) AS coordinates,
+	dop.customer_location AS customer_location,
+	
+	json_build_object(
+'name',customer.name,'phone',customer.phone,'location',customer_state.name
+	) customer_info,
+
 
 dop.delivery_notes AS additional_note,
 	json_agg(
 json_build_object(
-'id',pt.id,'name',pt.name->>'en_US','image',pt.image_1920_url,
+'id',dol.id,'name',pt.name->>'en_US','image',pt.image_1920_url,
 'qunatity',dol.quantity,'uom',uom.name->>'en_US','description',dol.description
 )
 	) AS items
@@ -2333,26 +2329,30 @@ LEFT JOIN uom_uom uom ON dol.uom = uom.id
 LEFT JOIN product_template pt
     ON dol.product_id = pt.id
 LEFT JOIN sale_order dso ON dso.id = dop.so_id
+LEFT JOIN sale_order iso ON iso.id = dop.sale_order_id::integer
+
 LEFT JOIN res_partner customer ON dop.customer_id = customer.id
-CROSS JOIN ir_config_parameter icp
+LEFT JOIN res_country_state customer_state ON customer.state_id = customer_state.id 
 
 WHERE
-    icp.key = 'image.base.url'
-    AND ru.token = %s --'760e9d74bdc5ed81107e62aa4f589c99'
+     ru.token = %s --'112b196a55260038feae474675478dab'
 	AND ru.token_expiration_time > NOW()
 AND dop.state IN ('driver', 'picked')
- AND dop.id = %s --4
+ AND dop.id = %s --54
 
 GROUP BY
     dop.id,
     dop.name,
+	order_comp.id,
     order_comp.logo_url,
     order_comp.name,
     order_partner.street,
     order_partner.city,
 	dso.superapp_order_status,
 	customer.id,
+	customer_state.name,
     rcs.name,
+	iso.superapp_order_status,
     dop.delivery_date;
 ```
 
@@ -2370,7 +2370,7 @@ SELECT
 	json_build_object(
 'name',order_comp.name,'branch',order_partner.street
 	) AS pickup_from,
-	dop.delivery_date AS date,
+	to_char(dop.delivery_date, 'MM/DD/YYYY') AS date,
 	dop.state AS status
    
 FROM delivery_order dop
@@ -2394,12 +2394,10 @@ LEFT JOIN res_partner order_partner
     ON order_partner.id = order_comp.partner_id
 
 
-CROSS JOIN ir_config_parameter icp
 
 WHERE
-    icp.key = 'image.base.url'
-    AND ru.token = %s --'760e9d74bdc5ed81107e62aa4f589c99'
-	AND ru.token_expiration_time > NOW()
+    ru.token =%s --	 '112b196a55260038feae474675478dab'
+AND ru.token_expiration_time > NOW()
 AND dop.state IN ('delivered', 'canceled')
 
 GROUP BY
@@ -2407,9 +2405,9 @@ GROUP BY
     dop.name,
     order_comp.name,
     order_partner.street
-
-LIMIT %s --10
-OFFSET %s --0;
+ORDER BY dop.id DESC
+LIMIT %s -- 10
+OFFSET %s -- 0;
 ```
 
 ## Endpoint 26 — GET /api/v1/categories
