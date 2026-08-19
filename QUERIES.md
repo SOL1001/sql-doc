@@ -858,35 +858,75 @@ OFFSET %s --0;
 ## Endpoint 15 — GET /api/v1/search/{query:string}
 
 ```sql
-SELECT
-	rc.id,
-    rc.name,
-	rc.merchant,
-		cbt.code AS business_type,
+WITH merchant_stats AS (
+    SELECT 
+        rc.id,
+        rc.name,
+        rc.merchant,
+        cbt.code AS business_type,
+        rc.logo_url AS logo,
+        rc.banner_url AS banner,
+        rc.is_featured,
+        rc.email,
+        rc.phone,
+        rc.parent_id,
+        prc.merchant AS parent_merchant,
+        
+        (
+            SELECT COUNT(*) 
+            FROM product_template pt 
+            WHERE pt.company_id = rc.id 
+              AND pt.active = true 
+              AND pt.sale_ok = true          
+              AND pt.x_superapp_approval_status = 'approved'     
+        ) AS product_template_count,
+        
+        (
+            SELECT COUNT(*) 
+            FROM product_product pp 
+            INNER JOIN product_template pt ON pp.product_tmpl_id = pt.id 
+            WHERE pt.company_id = rc.id 
+              AND pp.active = true 
+              AND pt.active = true
+              AND pt.sale_ok = true 
+              AND  pt.x_superapp_approval_status = 'approved'  
+        ) AS product_variant_count
 
-	rc.logo_web AS logo,
-	rc.banner_url AS banner,
-	rc.is_featured,
-	rc.email,
-	rc.phone,
-	rc.parent_id,
-prc.merchant AS parent_merchant,
-	COUNT(pt.id) AS product_template_count,
-	COUNT(pp.id) AS product_variant_count
-FROM res_company rc LEFT JOIN product_template pt ON pt.company_id = rc.id 
-LEFT JOIN res_company prc ON rc.parent_id = prc.id
-LEFT JOIN product_product pp ON pp.product_tmpl_id = pt.id LEFT JOIN company_business_type cbt ON cbt.id = rc.business_type_id
-WHERE
-    (
-        rc.name ILIKE %s --'%afri%'
-        OR rc.merchant ILIKE %s --'%afri%'
-    )
-    AND rc.cps_enabled = true
-GROUP BY
-rc.name,
-rc.id,
-cbt.code,
-prc.merchant;
+    FROM res_company rc 
+    LEFT JOIN res_company prc ON rc.parent_id = prc.id
+    LEFT JOIN company_business_type cbt ON cbt.id = rc.business_type_id
+    WHERE 
+        (rc.name ILIKE %s --'%afri%' 
+		OR rc.merchant ILIKE %s --'%afri%'
+		)
+        AND rc.cps_enabled = true
+)
+SELECT 
+    json_build_object(
+        'count', (SELECT COUNT(*) FROM merchant_stats),
+        'status', 'success',
+        'merchants', COALESCE(
+            json_agg(
+                json_build_object(
+                    'id', ms.id,
+                    'name', ms.name,
+                    'merchant', ms.merchant,
+                    'business_type', ms.business_type,
+                    'logo', ms.logo,
+                    'banner', ms.banner,
+                    'is_featured', ms.is_featured,
+                    'email', ms.email,
+                    'phone', ms.phone,
+                    'parent_id', ms.parent_id,
+                    'parent_merchant', ms.parent_merchant,
+                    'product_template_count', ms.product_template_count,
+                    'product_variant_count', ms.product_variant_count
+                )
+            ), 
+            '[]'::json 
+        )
+    ) AS response
+FROM merchant_stats ms;
 ```
 
 ## Endpoint 16 — GET /api/v1/search/all/<query:string>
@@ -906,7 +946,7 @@ SELECT json_build_object(
         WHERE
             (
                 rc.name ILIKE %s -- '%co%'
-                OR rc.merchant ILIKE %s -- '%co%'
+                OR rc.merchant ILIKE  %s --'%co%'
             )
             AND rc.cps_enabled = TRUE
             AND rc.is_delivery = FALSE
@@ -949,8 +989,8 @@ SELECT json_build_object(
 
                 WHERE
                     (
-                        rc.name ILIKE %s -- '%co%'
-                        OR rc.merchant ILIKE %s -- '%co%'
+                        rc.name ILIKE  %s --'%co%'
+                        OR rc.merchant ILIKE  %s --'%co%'
                     )
                     AND rc.cps_enabled = TRUE
                     AND rc.is_delivery = FALSE
@@ -986,7 +1026,7 @@ SELECT json_build_object(
                         pt.name->>'en_US',
                         pt.name->>'en',
                         ''
-                    ) ILIKE %s -- '%co%'
+                    ) ILIKE  %s --'%co%'
             
             AND rc.cps_enabled = TRUE
             AND rc.is_delivery = FALSE
@@ -1006,14 +1046,14 @@ SELECT json_build_object(
                         ''
                     ) AS name,
 
-                    pt.default_code,
-                    pt.list_price,
+                    pt.image_1920_url AS image_url,
+                    pt.ecommerce_float_price AS list_price,
 
                     json_build_object(
                         'id', rc.id,
                         'name', rc.name,
                         'merchant', rc.merchant,
-                        'logo', rc.logo_web
+                        'logo', rc.logo_url
                     ) AS company,
 
                     pt.average_rating,
@@ -1033,7 +1073,7 @@ SELECT json_build_object(
                         pt.name->>'en_US',
                         pt.name->>'en',
                         ''
-                    ) ILIKE %s -- '%co%'
+                    ) ILIKE %s --'%co%'
 
                     AND rc.cps_enabled = TRUE
                     AND rc.is_delivery = FALSE
@@ -1051,7 +1091,7 @@ SELECT json_build_object(
     (
         SELECT COUNT(DISTINCT pec.id)
         FROM product_ecomerce_categories pec 
-		WHERE pec.name ILIKE %s -- '%co%'
+		WHERE pec.name ILIKE %s --'%co%'
     ),
     'categories',
     COALESCE(
@@ -1067,7 +1107,7 @@ SELECT json_build_object(
                 FROM product_ecomerce_categories pec
 
                 WHERE
-                    pec.name ILIKE %s -- '%co%'
+                    pec.name ILIKE %s --'%co%'
 
             ) category
         ),
@@ -1087,22 +1127,24 @@ pt.image_1920_url AS image_url,
 pt.average_rating,
 COUNT(pr.id) AS total_reviews,
 json_build_object (
-'id',rc.id,'name',rc.name,'merchant',rc.merchant,'logo',rc.logo_web
+'id',rc.id,'name',rc.name,'merchant',rc.merchant,'logo',rc.logo_url
 ) AS company
 
 FROM product_template pt 
 LEFT JOIN res_company rc on rc.id = pt.company_id
 LEFT JOIN product_review pr ON pr.product_template = pt.id 
-CROSS JOIN ir_config_parameter icp
 WHERE
-icp.key = 'image.base.url'
-AND rc.cps_enabled = true
+ rc.cps_enabled = true
 AND COALESCE (
 pt.name->>'en_US',
 pt.name->>'en',
 ''
-) ILIKE %s -- '%lo%'
-GROUP BY pt.id,icp.value,rc.id; 
+) ILIKE %s --'%lo%'
+GROUP BY
+pt.id,rc.id
+ORDER BY pt.id DESC
+OFFSET 0
+LIMIT 10; 
 ```
 
 ## Endpoint 18 — GET /api/v1/categories/search?query={query:string}
@@ -1111,17 +1153,20 @@ GROUP BY pt.id,icp.value,rc.id;
 SELECT pec.id,
        pec.name,
        pec.complete_name,
-       pec.image_1_url,
-       COUNT(pt.id) AS items
+       pec.image_1_url AS image,
+       COUNT(pt.id) AS items,
+	   parent.id,
+	   parent.name
 FROM product_ecomerce_categories pec
     LEFT JOIN product_template pt ON pt.ecomerce_category_id = pec.id 
     LEFT JOIN res_company rc ON pt.company_id = rc.id
-WHERE pec.name ILIKE %s -- '%co%'
+	LEFT JOIN product_ecomerce_categories parent ON pec.parent_id = parent.id
+WHERE pec.name ILIKE %s --'%co%'
     AND pt.x_superapp_approval_status = 'approved'
     AND rc.cps_enabled = true
     AND rc.is_delivery = false
 GROUP BY
-pec.id
+pec.id,parent.id
 OFFSET %s --0
 LIMIT %s; --10;
 ```
