@@ -341,9 +341,8 @@ LIMIT %s;
 
 ## Endpoint 7 — GET /api/v1/populars
 
-```sql 
-SELECT 
-  
+```sql
+SELECT
     c.name AS name,
     c.logo_url,
     c.merchant
@@ -353,9 +352,10 @@ WHERE c.parent_id IS NULL
   AND c.is_delivery = false
   AND c.active = true
   AND c.merchant IS NOT NULL
-  AND c.superapp_orders > 0 ORDER BY c.superapp_orders DESC 
-  OFFSET %s --0
-  LIMIT  %s --10;
+  AND c.superapp_orders > 0
+  AND c.superapp_orders < %s
+ORDER BY c.superapp_orders DESC
+LIMIT %s;
 ```
 
 
@@ -371,7 +371,7 @@ SELECT
 FROM product_ecomerce_categories c
 LEFT JOIN product_template pt
     ON pt.ecomerce_category_id = c.id
-WHERE c.superapp_sale_count > 0
+WHERE c.superapp_sale_count > 0 AND c.superapp_sale_count < %s -- 20
 GROUP BY
     c.id,
     c.name,
@@ -388,9 +388,10 @@ LIMIT %s; --10;
 WITH merchant_company AS (
     SELECT id
     FROM res_company
-    WHERE merchant = %s --'MRT000001SPR'
+    WHERE merchant = %s
     LIMIT 1
 ),
+
 category_sales AS (
     SELECT
         sol.category_id,
@@ -400,12 +401,13 @@ category_sales AS (
         ON so.id = sol.order_id
     JOIN res_company rc
         ON rc.id = so.company_id
-    WHERE rc.merchant = %s --'MRT000001SPR'
+    WHERE rc.merchant = %s
       AND so.is_superapp_order = TRUE
       AND so.superapp_order_status = 'delivered'
       AND sol.category_id IS NOT NULL
     GROUP BY sol.category_id
 )
+
 SELECT
     c.id AS category_id,
     c.name AS category_name,
@@ -426,19 +428,24 @@ LEFT JOIN product_template pt
             WHERE parent_id = mc.id
         )
     )
+WHERE
+    cs.total_sold_qty < %s
 GROUP BY
     c.id,
     c.name,
-    c.image_url,
+    c.image_1_url,
     cs.total_sold_qty
 ORDER BY
-    cs.total_sold_qty DESC;
+    cs.total_sold_qty DESC,
+    c.id DESC
+LIMIT %s;
 ```
 
 
 ## Endpoint 10 — GET /api/v1/popular_products
 
 ```sql
+
 
 SELECT 
     pt.id AS product_id,
@@ -545,8 +552,8 @@ WHERE
     AND pt.ecommerce_float_price <= %s -- 10000000 default
     AND pt.is_in_stock = true
     AND pt.active = true 
+	AND pt.sold_count < %s 
 ORDER BY pt.sold_count DESC 
-OFFSET %s --0
 LIMIT %s; --10;
 
 
@@ -660,9 +667,9 @@ WHERE
     AND pt.ecommerce_float_price >= %s -- 0 default 
     AND pt.ecommerce_float_price <= %s -- 10000000 default
     AND pt.is_in_stock = true
-    AND pt.active = true 
+    AND pt.active = true
+    AND pt.sold_count < %s  
 ORDER BY pt.sold_count DESC 
-OFFSET %s --0
 LIMIT %s; --10;
 
 
@@ -789,8 +796,8 @@ WHERE
     AND pt.ecommerce_float_price <= %s -- 10000000 
     AND pt.is_in_stock = true
     AND pt.active = true
+    AND pt.sold_count < %s 
 ORDER BY pt.sold_count DESC 
-OFFSET %s --0 
 LIMIT %s; -- 10;
 
 ```
@@ -805,8 +812,9 @@ pec.superapp_sale_count AS total_sold_qty,
 COUNT(pt.id) AS product_count,
 pec.image_1_url
 FROM product_ecomerce_categories pec LEFT JOIN product_template pt ON pt.ecomerce_category_id = pec.id
+WHERE pec.superapp_sale_count > 0 AND pec.superapp_sale_count < %s
+ORDER BY pec.superapp_sale_count DESC
 GROUP BY pec.id,pec.name,pec.superapp_sale_count
-OFFSET %s --0
 LIMIT %s -- 10 ;
 ```
 
@@ -821,12 +829,14 @@ SELECT
         SELECT COUNT(*)
         FROM product_template pt
         WHERE pt.ecomerce_category_id = pec.id
-        AND (
-            pt.company_id = rc.id
-            OR pt.company_id IN (
-                SELECT id FROM res_company WHERE parent_id = rc.id
-            )
-        )
+          AND (
+              pt.company_id = rc.id
+              OR pt.company_id IN (
+                  SELECT id
+                  FROM res_company
+                  WHERE parent_id = rc.id
+              )
+          )
     ) AS product_count,
     COUNT(sol.id) AS total_sold_qty,
     pec.image_1_url AS image
@@ -838,7 +848,7 @@ LEFT JOIN sale_order so
 LEFT JOIN res_company rc
     ON so.company_id = rc.id
 WHERE
-    rc.merchant = %s --'MRT000001SPR'
+    rc.merchant = %s
     AND rc.cps_enabled = true
     AND so.superapp_order_status = 'delivered'
     AND so.is_superapp_order = true
@@ -848,10 +858,19 @@ GROUP BY
     pec.name,
     pec.image_1_url,
     rc.id
+HAVING
+    %s IS NULL
+    OR (
+        COUNT(sol.id),
+        pec.id
+    ) < (
+        %s,
+        %s
+    )
 ORDER BY
-    COUNT(sol.id) DESC
-LIMIT %s --10
-OFFSET %s --0;
+    COUNT(sol.id) DESC,
+    pec.id DESC
+LIMIT %s;
 ```
 
 
