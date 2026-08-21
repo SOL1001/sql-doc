@@ -2216,7 +2216,7 @@ LEFT JOIN sale_order iso ON iso.id = dop.sale_order_id::integer
 WHERE
     ru.token = %s --'112b196a55260038feae474675478dab'
 	AND ru.token_expiration_time > NOW()
- AND dop.state IN ('driver', 'picked')
+ AND dop.state IN ('driver', 'picked') AND dop.id < %s
 GROUP BY
     dop.id,
     dop.name,
@@ -2231,7 +2231,6 @@ GROUP BY
     iso.superapp_order_status
 
 ORDER BY dop.id DESC
-LIMIT %s -- 10
 OFFSET %s -- 0;
 ```
 
@@ -2373,7 +2372,7 @@ LEFT JOIN res_partner order_partner
 WHERE
     ru.token =%s --	 '112b196a55260038feae474675478dab'
 AND ru.token_expiration_time > NOW()
-AND dop.state IN ('delivered', 'canceled')
+AND dop.state IN ('delivered', 'canceled') AND dop.id < %s
 
 GROUP BY
     dop.id,
@@ -2381,7 +2380,6 @@ GROUP BY
     order_comp.name,
     order_partner.street
 ORDER BY dop.id DESC
-LIMIT %s -- 10
 OFFSET %s -- 0;
 ```
 
