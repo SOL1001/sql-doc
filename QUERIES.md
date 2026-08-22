@@ -2603,26 +2603,12 @@ OFFSET %s -- 0;
 ## Endpoint 26 — GET /api/v1/categories
 
 ```sql
-
-
 WITH params AS (
     SELECT
-        NULL::int AS page,
-        NULL::int AS per_page
+        NULL::int AS cursor_id,
+        %s::int AS per_page
 ),
-
-request_params AS (
-    SELECT
-        p.*,
-        CASE
-            WHEN p.page IS NULL OR p.per_page IS NULL
-                THEN NULL
-            ELSE (p.page - 1) * p.per_page
-        END AS requested_offset
-    FROM params p
-),
-
-active_categories AS (
+paged_categories AS (
     SELECT
         c.id,
         c.name,
@@ -2631,41 +2617,28 @@ active_categories AS (
         c.product_count,
         c.description
     FROM product_ecomerce_categories c
+    CROSS JOIN params p
     WHERE c.parent_id IS NULL
       AND c.active IS TRUE
-),
-
-total_count AS (
-    SELECT COUNT(*)::int AS total
-    FROM active_categories
-),
-
-paged_categories AS (
-    SELECT
-        c.*
-    FROM active_categories c
-    ORDER BY c.id
+      AND (
+          p.cursor_id IS NULL
+          OR c.id > p.cursor_id
+      )
+    ORDER BY c.id ASC
     LIMIT (
-        SELECT per_page
-        FROM request_params
-    )
-    OFFSET (
-        SELECT COALESCE(requested_offset, 0)
-        FROM request_params
+        SELECT LEAST(GREATEST(per_page, 1), 100) + 1
+        FROM params
     )
 )
 SELECT
-    c.id,
-    c.name,
-    NULLIF(c.image_1_url, '') AS image,
-    NULLIF(c.category_banner_url, '') AS banner,
-    COALESCE(c.product_count, 0) AS items,
-    c.description,
-    tc.total
-FROM paged_categories c
-CROSS JOIN total_count tc
-ORDER BY c.id;
-
+    id,
+    name,
+    NULLIF(image_1_url, '') AS image,
+    NULLIF(category_banner_url, '') AS banner,
+    COALESCE(product_count, 0) AS items,
+    description
+FROM paged_categories
+ORDER BY id ASC;
 ```
 
 
