@@ -2259,167 +2259,82 @@ ORDER BY pm.id DESC;
 ## Endpoint 21 — GET /api/v1/merchant/{merchant}
 
 ```sql
-
-WITH params AS (
-    SELECT
-        %s::text AS merchant
-),
-merchant_company AS (
-    SELECT
-        c.id, c.name, c.merchant,
-        c.logo_url, c.banner_url, c.product_count, c.variant_count,
-        c.open_hour, c.open_moment, c.close_hour, c.close_moment,
-        c.cps_account_number, c.lat_location, c.lng_location,
-        c.map_holder, c.description, c.is_featured,
-        c.is_delivery, c.business_type_id, c.partner_id
-    FROM params p
-    JOIN res_company c
-        ON c.merchant = p.merchant
-    WHERE c.active IS TRUE
-    LIMIT 1
-),
-branches AS (
-    SELECT
-        b.id, b.parent_id, b.name,
-        b.merchant, b.logo_url, b.banner_url,
-        b.product_count, b.variant_count, b.open_hour,
-        b.open_moment, b.close_hour, b.close_moment,
-        b.cps_account_number, b.lat_location, b.lng_location,
-        b.map_holder, b.description, b.is_featured, b.is_delivery,
-        b.business_type_id, b.partner_id
-    FROM res_company b
-    JOIN merchant_company mc
-        ON mc.id = b.parent_id
-    WHERE b.cps_enabled IS TRUE
-      AND COALESCE(b.is_delivery, FALSE) IS FALSE
-      AND b.active IS TRUE
-      AND b.merchant IS NOT NULL
-      AND b.merchant != ''
-),
-branch_payload AS (
-    SELECT
-        b.parent_id,
-        jsonb_agg(
-            jsonb_build_object(
-                'id', b.id,
-                'name', b.name,
-                'branch_id', b.merchant,
-                'logo', b.logo_url,
-				'banner', b.banner_url,
-                'is_featured',COALESCE(b.is_featured, FALSE),
-                'business_type',bbt.code,
-                'opening_time',
-                CASE
-                    WHEN b.open_hour IS NOT NULL
-                     AND b.open_moment IS NOT NULL
-                    THEN
-                        LPAD(FLOOR(b.open_hour)::int::text,2,'0')
-                        || ':'||
-                        LPAD(
-                            LEAST(
-                                FLOOR( ( b.open_hour - FLOOR(b.open_hour) ) * 60 )::numeric, 59
-                            )::int::text, 2,'0'
-                        )
-                        || ' ' || UPPER(b.open_moment)
-                    ELSE NULL
-                END,
-                'closing_time',
-                CASE
-                    WHEN b.close_hour IS NOT NULL
-                     AND b.close_moment IS NOT NULL
-                    THEN
-                        LPAD(FLOOR(b.close_hour)::int::text,2,'0')
-                        || ':' ||
-                        LPAD(
-                            LEAST(
-                                FLOOR((b.close_hour - FLOOR(b.close_hour) ) * 60)::numeric,59
-                            )::int::text,2,'0'
-                        )
-                        || ' ' || UPPER(b.close_moment)
-                    ELSE NULL
-                END,
-                'cps_account_number',NULLIF(b.cps_account_number,''),
-                'email',NULLIF(brp.email,''),
-                'phone',NULLIF(brp.phone,''),
-                'lat_location',NULLIF(b.lat_location,0),
-                'lng_location',NULLIF(b.lng_location,0),
-                'map_holder',NULLIF(b.map_holder,''),
-                'street',NULLIF(brp.street,''),
-                'city',NULLIF(brp.city,''),
-                'description',NULLIF(b.description,''),
-                'product_template_count',COALESCE(b.product_count,0),
-                'product_variant_count',COALESCE(b.variant_count,0),
-                'is_delivery',COALESCE(b.is_delivery,FALSE),
-                'is_ecommerce',NOT COALESCE(b.is_delivery,FALSE)
-            )
-            ORDER BY b.id
-        ) AS branches
-    FROM branches b
-    LEFT JOIN company_business_type bbt
-        ON bbt.id = b.business_type_id
-    LEFT JOIN res_partner brp
-        ON brp.id = b.partner_id
-    GROUP BY
-        b.parent_id
-)
+EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
 SELECT
-    mc.id,
-    mc.name,
-    mc.merchant AS merchant_id,
-    bt.code AS business_type,
-    NULLIF( mc.logo_url,'') AS logo,
-    COALESCE( mc.is_featured, FALSE ) AS is_featured,
-    NULLIF( mc.banner_url, '' ) AS banner,
+    c.id, c.name, c.merchant AS merchant_id,
+    (SELECT bt.code FROM company_business_type bt WHERE bt.id = c.business_type_id) AS business_type,
+    NULLIF(c.logo_url, '') AS logo,
+    COALESCE(c.is_featured, FALSE) AS is_featured,
+    NULLIF(c.banner_url, '') AS banner,
     CASE
-        WHEN mc.open_hour IS NOT NULL
-         AND mc.open_moment IS NOT NULL
-        THEN
-            LPAD( FLOOR(mc.open_hour)::int::text, 2, '0' )
-            || ':' ||
-            LPAD(
-                LEAST(
-                    FLOOR((mc.open_hour - FLOOR(mc.open_hour) ) * 60 )::numeric,59
-                )::int::text,2,'0')
-            || ' ' || UPPER(mc.open_moment)
+        WHEN c.open_hour IS NOT NULL AND c.open_moment IS NOT NULL
+        THEN LPAD(FLOOR(c.open_hour)::int::text, 2, '0') || ':' || LPAD(LEAST(FLOOR((c.open_hour - FLOOR(c.open_hour)) * 60)::numeric, 59)::int::text, 2, '0') || ' ' || UPPER(c.open_moment)
         ELSE NULL
     END AS opening_time,
     CASE
-        WHEN mc.close_hour IS NOT NULL
-         AND mc.close_moment IS NOT NULL
-        THEN
-            LPAD( FLOOR(mc.close_hour)::int::text, 2,'0' )
-            || ':' ||
-            LPAD(
-                LEAST(
-                    FLOOR(
-                        ( mc.close_hour - FLOOR(mc.close_hour) ) * 60
-                    )::numeric, 59
-                )::int::text, 2,'0'
-            )
-            || ' ' || UPPER(mc.close_moment)
+        WHEN c.close_hour IS NOT NULL AND c.close_moment IS NOT NULL
+        THEN LPAD(FLOOR(c.close_hour)::int::text, 2, '0') || ':' || LPAD(LEAST(FLOOR((c.close_hour - FLOOR(c.close_hour)) * 60)::numeric, 59)::int::text, 2, '0') || ' ' || UPPER(c.close_moment)
         ELSE NULL
     END AS closing_time,
-    NULLIF(mc.cps_account_number,'') AS cps_account_number,
-    NULLIF(mc.lat_location,0) AS lat_location,
-    NULLIF(mc.lng_location,0) AS lng_location,
-    NULLIF(mc.map_holder,'') AS map_holder,
-    NULLIF(rp.street,'') AS street,
-    NULLIF(rp.city,'') AS city,
-    NULLIF(mc.description,'') AS description,
-    COALESCE(bp.branches,'[]'::jsonb) AS branches,
-    COALESCE(mc.product_count,0) AS product_template_count,
-    COALESCE(mc.variant_count,0) AS product_variant_count
-FROM merchant_company mc
-LEFT JOIN company_business_type bt
-    ON bt.id = mc.business_type_id
-LEFT JOIN res_partner rp
-    ON rp.id = mc.partner_id
-LEFT JOIN branch_payload bp
-    ON bp.parent_id = mc.id;
-
-
-	
-
+    NULLIF(c.cps_account_number, '') AS cps_account_number,
+    NULLIF(c.lat_location, 0) AS lat_location,
+    NULLIF(c.lng_location, 0) AS lng_location,
+    NULLIF(c.map_holder, '') AS map_holder,
+    NULLIF(rp.street, '') AS street,
+    NULLIF(rp.city, '') AS city,
+    NULLIF(c.description, '') AS description,
+    COALESCE(branches.branches, '[]'::jsonb) AS branches,
+    COALESCE(c.product_count, 0) AS product_template_count,
+    COALESCE(c.variant_count, 0) AS product_variant_count
+FROM res_company c
+LEFT JOIN res_partner rp ON rp.id = c.partner_id
+LEFT JOIN LATERAL (
+    SELECT JSONB_AGG(
+        JSONB_BUILD_OBJECT(
+            'id', b.id,
+            'name', b.name,
+            'branch_id', b.merchant,
+            'logo', b.logo_url,
+            'banner', b.banner_url,
+            'is_featured', COALESCE(b.is_featured, FALSE),
+            'business_type', (SELECT bbt.code FROM company_business_type bbt WHERE bbt.id = b.business_type_id),
+            'opening_time', CASE
+                WHEN b.open_hour IS NOT NULL AND b.open_moment IS NOT NULL
+                THEN LPAD(FLOOR(b.open_hour)::int::text, 2, '0') || ':' || LPAD(LEAST(FLOOR((b.open_hour - FLOOR(b.open_hour)) * 60)::numeric, 59)::int::text, 2, '0') || ' ' || UPPER(b.open_moment)
+                ELSE NULL
+            END,
+            'closing_time', CASE
+                WHEN b.close_hour IS NOT NULL AND b.close_moment IS NOT NULL
+                THEN LPAD(FLOOR(b.close_hour)::int::text, 2, '0') || ':' || LPAD(LEAST(FLOOR((b.close_hour - FLOOR(b.close_hour)) * 60)::numeric, 59)::int::text, 2, '0') || ' ' || UPPER(b.close_moment)
+                ELSE NULL
+            END,
+            'cps_account_number', NULLIF(b.cps_account_number, ''),
+            'email', NULLIF(brp.email, ''),
+            'phone', NULLIF(brp.phone, ''),
+            'lat_location', NULLIF(b.lat_location, 0),
+            'lng_location', NULLIF(b.lng_location, 0),
+            'map_holder', NULLIF(b.map_holder, ''),
+            'street', NULLIF(brp.street, ''),
+            'city', NULLIF(brp.city, ''),
+            'description', NULLIF(b.description, ''),
+            'product_template_count', COALESCE(b.product_count, 0),
+            'product_variant_count', COALESCE(b.variant_count, 0),
+            'is_delivery', COALESCE(b.is_delivery, FALSE),
+            'is_ecommerce', NOT COALESCE(b.is_delivery, FALSE)
+        )
+        ORDER BY b.id
+    ) AS branches
+    FROM res_company b
+    LEFT JOIN res_partner brp ON brp.id = b.partner_id
+    WHERE b.parent_id = c.id
+      AND b.cps_enabled IS TRUE
+      AND COALESCE(b.is_delivery, FALSE) IS FALSE
+      AND b.active IS TRUE
+      AND NULLIF(TRIM(b.merchant), '') IS NOT NULL
+) branches ON TRUE
+WHERE c.merchant = %s::text  --'MRT000016SPR'
+  AND c.active IS TRUE
+LIMIT 1;
 ```
 
 ## Endpoint 22 — GET /api/v1/wishlist/{user_id}
