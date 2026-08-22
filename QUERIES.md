@@ -1393,35 +1393,43 @@ pt.name->>'en_US',
 pt.name->>'en',
 ''
 ) ILIKE %s --'%lo%'
+AND pr.id < %s
 GROUP BY
 pt.id,rc.id
 ORDER BY pt.id DESC
-OFFSET 0
 LIMIT 10; 
 ```
 
 ## Endpoint 18 — GET /api/v1/categories/search?query={query:string}
 
 ```sql
-SELECT pec.id,
-       pec.name,
-       pec.complete_name,
-       pec.image_1_url AS image,
-       COUNT(pt.id) AS items,
-	   parent.id,
-	   parent.name
+SELECT
+    pec.id,
+    pec.name,
+    pec.complete_name,
+    pec.image_1_url AS image,
+    COUNT(pt.id) AS items,
+    parent.id AS parent_id,
+    parent.name AS parent_name
 FROM product_ecomerce_categories pec
-    LEFT JOIN product_template pt ON pt.ecomerce_category_id = pec.id 
-    LEFT JOIN res_company rc ON pt.company_id = rc.id
-	LEFT JOIN product_ecomerce_categories parent ON pec.parent_id = parent.id
-WHERE pec.name ILIKE %s --'%co%'
+LEFT JOIN product_template pt
+    ON pt.ecomerce_category_id = pec.id
+LEFT JOIN res_company rc
+    ON pt.company_id = rc.id
+LEFT JOIN product_ecomerce_categories parent
+    ON pec.parent_id = parent.id
+WHERE
+    pec.name ILIKE %s
     AND pt.x_superapp_approval_status = 'approved'
     AND rc.cps_enabled = true
     AND rc.is_delivery = false
+    AND (%s IS NULL OR pec.id < %s)
 GROUP BY
-pec.id,parent.id
-OFFSET %s --0
-LIMIT %s; --10;
+    pec.id,
+    parent.id
+ORDER BY
+    pec.id DESC
+LIMIT %s;
 ```
 
 ## Endpoint 19 — GET /api/v1/total_products
