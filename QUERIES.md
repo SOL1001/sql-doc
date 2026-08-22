@@ -1876,112 +1876,61 @@ ORDER BY
 ## Endpoint 20 — GET /api/v1/merchants/list_all
 
 ```sql
+-- EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
 WITH params AS (
     SELECT
-        1::int AS page,
+        NULL::int AS cursor_id,
         10::int AS per_page,
         NULL::text AS is_featured_param,
         NULL::text AS is_discount_param,
-        NULL::text AS is_delivery_param,
-        NULL::int AS limit_param
+        NULL::text AS is_delivery_param
 ),
-
 p AS (
     SELECT
-        page,
-        per_page,
-        ((page - 1) * per_page) AS offset_value,
+        cursor_id,
+        LEAST(GREATEST(per_page, 1), 100) AS per_page,
         CASE
-            WHEN lower(trim(coalesce(is_featured_param, '')))
-                IN ('true', 'yes', '1')
-            THEN TRUE
+            WHEN lower(trim(coalesce(is_featured_param, ''))) IN ('true', 'yes', '1') THEN TRUE
             ELSE FALSE
         END AS featured_filter,
         CASE
-            WHEN lower(trim(coalesce(is_discount_param, '')))
-                IN ('true', 'yes', '1')
-            THEN TRUE
-            WHEN lower(trim(coalesce(is_discount_param, '')))
-                IN ('false', 'no', '0')
-            THEN FALSE
+            WHEN lower(trim(coalesce(is_discount_param, ''))) IN ('true', 'yes', '1') THEN TRUE
+            WHEN lower(trim(coalesce(is_discount_param, ''))) IN ('false', 'no', '0') THEN FALSE
             ELSE NULL
         END AS discount_filter,
         CASE
-            WHEN lower(trim(coalesce(is_delivery_param, '')))
-                IN ('true', 'yes', '1')
-            THEN TRUE
-            WHEN lower(trim(coalesce(is_delivery_param, '')))
-                IN ('false', 'no', '0')
-            THEN FALSE
+            WHEN lower(trim(coalesce(is_delivery_param, ''))) IN ('true', 'yes', '1') THEN TRUE
+            WHEN lower(trim(coalesce(is_delivery_param, ''))) IN ('false', 'no', '0') THEN FALSE
             ELSE FALSE
-        END AS delivery_filter,
-        limit_param
+        END AS delivery_filter
     FROM params
 ),
-
 active_loyalty_companies AS (
-    SELECT DISTINCT
-        lp.company_id
+    SELECT DISTINCT lp.company_id
     FROM loyalty_program lp
     CROSS JOIN p
     WHERE p.discount_filter IS NOT NULL
       AND lp.is_ecommerce = TRUE
       AND lp.x_superapp_approval_status = 'approved'
-      AND (
-          lp.date_from IS NULL
-          OR lp.date_from <= CURRENT_DATE
-      )
-      AND (
-          lp.date_to IS NULL
-          OR lp.date_to >= CURRENT_DATE
-      )
+      AND (lp.date_from IS NULL OR lp.date_from <= CURRENT_DATE)
+      AND (lp.date_to IS NULL OR lp.date_to >= CURRENT_DATE)
 ),
-
-filtered_merchant_ids AS (
-    SELECT
-        c.id
+paginated_merchant_ids AS (
+    SELECT c.id
     FROM res_company c
     CROSS JOIN p
-    LEFT JOIN active_loyalty_companies alc
-        ON alc.company_id = c.id
+    LEFT JOIN active_loyalty_companies alc ON alc.company_id = c.id
     WHERE c.parent_id IS NULL
       AND c.merchant IS NOT NULL
       AND c.merchant <> ''
       AND c.cps_enabled = TRUE
       AND c.active = TRUE
       AND c.is_delivery = p.delivery_filter
-      AND (
-          NOT p.featured_filter
-          OR c.is_featured = TRUE
-      )
-      AND (
-          p.discount_filter IS NULL
-          OR (alc.company_id IS NOT NULL) = p.discount_filter
-      )
-),
-numbered_merchant_ids AS (
-    SELECT
-        fmi.id,
-        ROW_NUMBER() OVER (
-            ORDER BY fmi.id DESC
-        ) AS row_num
-    FROM filtered_merchant_ids fmi
-),
-paginated_merchant_ids AS (
-    SELECT
-        nmi.id
-    FROM numbered_merchant_ids nmi
-    CROSS JOIN p
-    WHERE nmi.row_num > p.offset_value
-      AND nmi.row_num <=
-          CASE
-              WHEN p.limit_param IS NULL
-              THEN p.offset_value + p.per_page
-              ELSE LEAST(
-                  p.offset_value + p.per_page,
-                  p.limit_param
-              )
-          END
+      AND (NOT p.featured_filter OR c.is_featured = TRUE)
+      AND (p.discount_filter IS NULL OR (alc.company_id IS NOT NULL) = p.discount_filter)
+      AND (p.cursor_id IS NULL OR c.id < p.cursor_id)
+    ORDER BY c.id DESC
+    LIMIT (SELECT per_page + 1 FROM p)
 ),
 paginated_merchants AS (
     SELECT
@@ -1998,10 +1947,8 @@ paginated_merchants AS (
         c.cps_account_number,
         c.business_type_id
     FROM paginated_merchant_ids pm
-    INNER JOIN res_company c
-        ON c.id = pm.id
+    JOIN res_company c ON c.id = pm.id
 ),
-
 page_loyalty_programs AS (
     SELECT
         lp.company_id,
@@ -2010,23 +1957,14 @@ page_loyalty_programs AS (
         lp.sequence,
         ROW_NUMBER() OVER (
             PARTITION BY lp.company_id
-            ORDER BY
-                lp.sequence,
-                lp.id
+            ORDER BY lp.sequence, lp.id
         ) AS loyalty_row_num
     FROM loyalty_program lp
-    INNER JOIN paginated_merchant_ids pm
-        ON pm.id = lp.company_id
+    JOIN paginated_merchant_ids pm ON pm.id = lp.company_id
     WHERE lp.is_ecommerce = TRUE
       AND lp.x_superapp_approval_status = 'approved'
-      AND (
-          lp.date_from IS NULL
-          OR lp.date_from <= CURRENT_DATE
-      )
-      AND (
-          lp.date_to IS NULL
-          OR lp.date_to >= CURRENT_DATE
-      )
+      AND (lp.date_from IS NULL OR lp.date_from <= CURRENT_DATE)
+      AND (lp.date_to IS NULL OR lp.date_to >= CURRENT_DATE)
 ),
 page_loyalty AS (
     SELECT
@@ -2036,84 +1974,50 @@ page_loyalty AS (
             json_build_object(
                 'id', plp.program_id,
                 'name', plp.program_name ->> 'en_US',
-                'rewards',
-                COALESCE(
+                'rewards', COALESCE(
                     json_agg(
                         json_build_object(
-                            'reward_type', lr.reward_type,
                             'discount', lr.discount,
-                            'discount_mode', lr.discount_mode,
-                            'discount_applicability', lr.discount_applicability,
-                            'description', lr.description ->> 'en_US'
-                        )
-                        ORDER BY lr.id
-                    )
-                    FILTER (WHERE lr.id IS NOT NULL),
+                            'discount_mode', lr.discount_mode
+                        ) ORDER BY lr.id
+                    ) FILTER (WHERE lr.id IS NOT NULL),
                     '[]'::json
                 )
             )
         ) AS discount
     FROM page_loyalty_programs plp
-    LEFT JOIN loyalty_reward lr
-        ON lr.program_id = plp.program_id
+    LEFT JOIN loyalty_reward lr ON lr.program_id = plp.program_id
     WHERE plp.loyalty_row_num = 1
-    GROUP BY
-        plp.company_id,
-        plp.program_id,
-        plp.program_name
+    GROUP BY plp.company_id, plp.program_id, plp.program_name
 )
 SELECT
-    pm.id AS company_id,
-    pm.name,
     pm.merchant AS merchant_id,
+    pm.name,
     NULLIF(pm.logo_url, '') AS logo,
     NULLIF(pm.banner_url, '') AS banner,
     bt.code AS business_type,
     COALESCE(pm.product_count, 0) AS total_products,
     CASE
-        WHEN pm.open_hour IS NOT NULL
-         AND pm.open_moment IS NOT NULL
-        THEN
-            LPAD(FLOOR(pm.open_hour)::int::text, 2, '0')
-            || ':' ||
-            LPAD(
-                LEAST(
-                    FLOOR((pm.open_hour - FLOOR(pm.open_hour)) * 60)::numeric,
-                    59
-                )::int::text,
-                2, '0'
-            )
-            || ' ' || UPPER(pm.open_moment)
+        WHEN pm.open_hour IS NOT NULL AND pm.open_moment IS NOT NULL THEN
+            LPAD(FLOOR(pm.open_hour)::int::text, 2, '0') || ':' ||
+            LPAD(LEAST(FLOOR((pm.open_hour - FLOOR(pm.open_hour)) * 60)::numeric, 59)::int::text, 2, '0') ||
+            ' ' || UPPER(pm.open_moment)
         ELSE NULL
     END AS opening_time,
     CASE
-        WHEN pm.close_hour IS NOT NULL
-         AND pm.close_moment IS NOT NULL
-        THEN
-            LPAD(FLOOR(pm.close_hour)::int::text, 2, '0')
-            || ':' ||
-            LPAD(
-                LEAST(
-                    FLOOR((pm.close_hour - FLOOR(pm.close_hour)) * 60)::numeric,
-                    59
-                )::int::text,
-                2, '0'
-            )
-            || ' ' || UPPER(pm.close_moment)
+        WHEN pm.close_hour IS NOT NULL AND pm.close_moment IS NOT NULL THEN
+            LPAD(FLOOR(pm.close_hour)::int::text, 2, '0') || ':' ||
+            LPAD(LEAST(FLOOR((pm.close_hour - FLOOR(pm.close_hour)) * 60)::numeric, 59)::int::text, 2, '0') ||
+            ' ' || UPPER(pm.close_moment)
         ELSE NULL
     END AS closing_time,
     NULLIF(pm.cps_account_number, '') AS cps_account_number,
     COALESCE(pl.is_discount, FALSE) AS is_discount,
-    COALESCE(pl.discount, '[]'::json) AS discount,
-    (SELECT COUNT(*) FROM filtered_merchant_ids) AS total
+    COALESCE(pl.discount, '[]'::json) AS discount
 FROM paginated_merchants pm
-LEFT JOIN company_business_type bt
-    ON bt.id = pm.business_type_id
-LEFT JOIN page_loyalty pl
-    ON pl.company_id = pm.id
-ORDER BY
-    pm.id DESC;
-
+LEFT JOIN company_business_type bt ON bt.id = pm.business_type_id
+LEFT JOIN page_loyalty pl ON pl.company_id = pm.id
+ORDER BY pm.id DESC;
 ```
 
 ## Endpoint 21 — GET /api/v1/merchant/{merchant}
@@ -2620,25 +2524,19 @@ paged_categories AS (
     CROSS JOIN params p
     WHERE c.parent_id IS NULL
       AND c.active IS TRUE
-      AND (
-          p.cursor_id IS NULL
-          OR c.id > p.cursor_id
-      )
+      AND (p.cursor_id IS NULL OR c.id > p.cursor_id)
     ORDER BY c.id ASC
-    LIMIT (
-        SELECT LEAST(GREATEST(per_page, 1), 100) + 1
-        FROM params
-    )
+    LIMIT (SELECT LEAST(GREATEST(per_page, 1), 100) + 1 FROM params)
 )
 SELECT
-    id,
-    name,
-    NULLIF(image_1_url, '') AS image,
-    NULLIF(category_banner_url, '') AS banner,
-    COALESCE(product_count, 0) AS items,
-    description
-FROM paged_categories
-ORDER BY id ASC;
+    c.id,
+    c.name,
+    NULLIF(c.image_1_url, '') AS image,
+    NULLIF(c.category_banner_url, '') AS banner,
+    COALESCE(c.product_count, 0) AS items,
+    c.description
+FROM paged_categories c
+ORDER BY c.id ASC;
 ```
 
 
