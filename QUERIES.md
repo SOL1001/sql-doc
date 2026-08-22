@@ -2189,7 +2189,7 @@ ORDER BY pm.id DESC;
 
 WITH params AS (
     SELECT
-        NULL::text AS merchant
+        'MRT000001SPR'::text AS merchant
 ),
 merchant_company AS (
     SELECT
@@ -2335,9 +2335,7 @@ SELECT
     NULLIF(mc.description,'') AS description,
     COALESCE(bp.branches,'[]'::jsonb) AS branches,
     COALESCE(mc.product_count,0) AS product_template_count,
-    COALESCE(mc.variant_count,0) AS product_variant_count,
-    COALESCE(mc.is_delivery,FALSE) AS is_delivery,
-    NOT COALESCE(mc.is_delivery,FALSE) AS is_ecommerce
+    COALESCE(mc.variant_count,0) AS product_variant_count
 FROM merchant_company mc
 LEFT JOIN company_business_type bt
     ON bt.id = mc.business_type_id
