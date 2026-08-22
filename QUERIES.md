@@ -2042,6 +2042,7 @@ WITH params AS (
     SELECT
         NULL::int AS cursor_id,
         10::int AS per_page,
+        NULL::int AS fetch_limit,
         NULL::text AS is_featured_param,
         NULL::text AS is_discount_param,
         NULL::text AS is_delivery_param
@@ -2050,6 +2051,7 @@ p AS (
     SELECT
         cursor_id,
         LEAST(GREATEST(per_page, 1), 100) AS per_page,
+        LEAST(GREATEST(COALESCE(fetch_limit, per_page + 1), 1), 1000) AS fetch_limit,
         CASE
             WHEN lower(trim(coalesce(is_featured_param, ''))) IN ('true', 'yes', '1') THEN TRUE
             ELSE FALSE
@@ -2091,7 +2093,7 @@ paginated_merchant_ids AS (
       AND (p.discount_filter IS NULL OR (alc.company_id IS NOT NULL) = p.discount_filter)
       AND (p.cursor_id IS NULL OR c.id < p.cursor_id)
     ORDER BY c.id DESC
-    LIMIT (SELECT per_page + 1 FROM p)
+    LIMIT (SELECT fetch_limit FROM p)
 ),
 paginated_merchants AS (
     SELECT
