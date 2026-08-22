@@ -358,10 +358,11 @@ LIMIT %s;
 
 ```sql
 SELECT
-
+    c.id
     c.name AS name,
     c.logo_url,
-    c.merchant
+    c.merchant,
+    c.superapp_orders
 FROM res_company c
 WHERE c.parent_id IS NULL
   AND c.cps_enabled = true
@@ -369,9 +370,9 @@ WHERE c.parent_id IS NULL
   AND c.active = true
   AND c.merchant IS NOT NULL
   AND c.superapp_orders > 0
-  AND c.superapp_orders < %s
+  AND (c.id,c.superapp_orders) < (%cursor_id,%cursor_superapp_orders)
 ORDER BY c.superapp_orders DESC
-LIMIT %s;
+LIMIT %lim;
 ```
 
 
@@ -383,19 +384,19 @@ SELECT
     c.name AS category_name,
     c.superapp_sale_count AS total_sold_qty,
     c.image_1_url AS image,
+    c.superapp_sale_count,
     COUNT(pt.id) AS product_count
 FROM product_ecomerce_categories c
 LEFT JOIN product_template pt
     ON pt.ecomerce_category_id = c.id
-WHERE c.superapp_sale_count > 0 AND c.superapp_sale_count < %s -- 20
+WHERE c.superapp_sale_count > 0 AND (c.id,c.superapp_sale_count) < (%cursor_id,%cursor_super_app_sale_count)
 GROUP BY
     c.id,
     c.name,
     c.superapp_sale_count,
     c.image_1_url
 ORDER BY c.superapp_sale_count DESC
-OFFSET %s -- 0
-LIMIT %s; --10; 
+LIMIT %lim; --10; 
 ```
 
 ## Endpoint 9 — GET /api/v1/popular_categories/{merchant_id:string}
@@ -445,7 +446,7 @@ LEFT JOIN product_template pt
         )
     )
 WHERE
-    cs.total_sold_qty < %s
+    (cs.id,cs.total_sold_qty) < %s
 GROUP BY
     c.id,
     c.name,
@@ -454,7 +455,7 @@ GROUP BY
 ORDER BY
     cs.total_sold_qty DESC,
     c.id DESC
-LIMIT %s;
+LIMIT %lim;
 ```
 
 
@@ -1660,11 +1661,11 @@ pt.name->>'en_US',
 pt.name->>'en',
 ''
 ) ILIKE %s --'%lo%'
-AND pr.id < %s
+AND pr.id < %cursor_id
 GROUP BY
 pt.id,rc.id
 ORDER BY pt.id DESC
-LIMIT 10; 
+LIMIT %lim; 
 ```
 
 ## Endpoint 18 — GET /api/v1/categories/search?query={query:string}
@@ -1698,13 +1699,13 @@ WHERE
     AND pt.x_superapp_approval_status = 'approved'
     AND rc.cps_enabled = true
     AND rc.is_delivery = false
-   AND pec.id < %s -- 1000
+   AND pec.id < %cursor_id -- 1000
 GROUP BY
     pec.id,
     parent.id
 ORDER BY
     pec.id DESC
-LIMIT %s; --2;
+LIMIT %lim; --2;
 ```
 
 ## Endpoint 19 — GET /api/v1/total_products
@@ -2655,7 +2656,7 @@ LEFT JOIN sale_order iso ON iso.id = dop.sale_order_id::integer
 WHERE
     ru.token = %s --'112b196a55260038feae474675478dab'
 	AND ru.token_expiration_time > NOW()
- AND dop.state IN ('driver', 'picked') AND dop.id < %s
+ AND dop.state IN ('driver', 'picked') AND dop.id < %cursor_id
 GROUP BY
     dop.id,
     dop.name,
@@ -2670,7 +2671,7 @@ GROUP BY
     iso.superapp_order_status
 
 ORDER BY dop.id DESC
-OFFSET %s -- 0;
+LIMIT %lim -- 0;
 ```
 
 
@@ -2811,7 +2812,7 @@ LEFT JOIN res_partner order_partner
 WHERE
     ru.token =%s --	 '112b196a55260038feae474675478dab'
 AND ru.token_expiration_time > NOW()
-AND dop.state IN ('delivered', 'canceled') AND dop.id < %s
+AND dop.state IN ('delivered', 'canceled') AND dop.id < %cursor_id
 
 GROUP BY
     dop.id,
@@ -2819,7 +2820,7 @@ GROUP BY
     order_comp.name,
     order_partner.street
 ORDER BY dop.id DESC
-OFFSET %s -- 0;
+LIMIT %lim -- 0;
 ```
 
 ## Endpoint 26 — GET /api/v1/categories
