@@ -6,118 +6,97 @@
 
 
 
-Query: app_user_id, page, per_page, merchant, history
-$1=app_user_id $2=merchant $3=history $4=per_page $5=offset
 
+**Query:** app_user_id (required), cursor, per_page (default 10)
+
+Bind params:  
+ $1 = app_user_id
+ $2 = fetch_limit       (per_page + 1)
+ $3 = cursor_id         (0 on first page; else last company_id from previous page)
+
+**Cursor rule:** keyset on `(order_count DESC, company_name ASC, company_id ASC)`. The cursor value is **`company_id`**; look up that row's `order_count` and `company_name` for the keyset comparison.
 
 ```sql
 WITH input AS (
-    SELECT $1::text AS app_user_id, $2::text AS merchant_filter, $3::text AS history, $4::int AS lim, $5::int AS off
+    SELECT
+        $1::text AS app_user_id,
+        $2::int  AS lim,
+        $3::int  AS cursor_id
 ),
 partner AS (
-    SELECT p.id FROM res_partner p JOIN input i ON TRUE
-    WHERE p.app_user_id = i.app_user_id AND p.active = TRUE LIMIT 1
+    SELECT p.id
+    FROM res_partner p
+    JOIN input i ON TRUE
+    WHERE p.app_user_id = i.app_user_id
+      AND p.active = TRUE
+    LIMIT 1
 ),
-merchant_company AS (
-    SELECT c.id FROM res_company c JOIN input i ON TRUE
-    WHERE i.merchant_filter <> '' AND c.merchant = i.merchant_filter
-      AND c.is_delivery = FALSE AND c.merchant IS NOT NULL LIMIT 1
-),
-filtered AS (
-    SELECT so.id, so.name, so.state, so.superapp_order_status, so.date_order,
-           ROUND(so.amount_total::numeric, 2) AS total_price, so."deliveryType",
-           so.driver_name, so.driver_mobile, so.driver_email, so.driver_delivery_medium,
-           rc.id AS company_id, rc.merchant, rc.name AS company_name,
-           NULLIF(TRIM(COALESCE(rc.logo_web, rp.image_1920_url, '')), '') AS logo_url,
-           rc.lat_location, rc.lng_location, rc.phone AS company_phone,
-           rp.street, rp.city, rcs.name AS state_name, rco.name->>'en_US' AS country_name, rcp.name AS parent_name
-    FROM input i
-    JOIN partner p ON TRUE
+base_companies AS (
+    SELECT
+        rc.id AS company_id,
+        rc.name AS company_name,
+        rc.merchant AS merchant,
+        NULLIF(TRIM(COALESCE(rc.logo_url, rp.image_1920_url, '')), '') AS logo_url,
+        COUNT(so.id)::int AS order_count
+    FROM partner p
     JOIN sale_order so ON so.partner_id = p.id AND so.is_superapp_order = TRUE
-    LEFT JOIN res_company rc ON rc.id = so.company_id
+    JOIN res_company rc ON rc.id = so.company_id
     LEFT JOIN res_partner rp ON rp.id = rc.partner_id
-    LEFT JOIN res_country_state rcs ON rcs.id = rp.state_id
-    LEFT JOIN res_country rco ON rco.id = rp.country_id
-    LEFT JOIN res_company rcp ON rcp.id = rc.parent_id
-    WHERE (i.merchant_filter = '' OR so.company_id = (SELECT id FROM merchant_company))
-      AND (i.history = '' OR i.history = 'all'
-           OR (i.history = 'active' AND so.superapp_order_status NOT IN ('cancelled','delivered'))
-           OR (i.history = 'inactive' AND so.superapp_order_status IN ('delivered','cancelled')))
+    GROUP BY rc.id, rc.name, rc.merchant, rc.logo_url, rp.image_1920_url
 ),
-guard AS (
-    SELECT EXISTS(SELECT 1 FROM partner) AS partner_exists,
-           CASE WHEN (SELECT merchant_filter FROM input) = '' THEN TRUE
-                ELSE EXISTS(SELECT 1 FROM merchant_company) END AS merchant_ok,
-           COALESCE((SELECT COUNT(*)::int FROM filtered), 0) AS total_count
+cursor_row AS (
+    SELECT b.order_count, b.company_name, b.company_id
+    FROM base_companies b
+    JOIN input i ON TRUE
+    WHERE i.cursor_id <> 0 AND b.company_id = i.cursor_id
+    LIMIT 1
 ),
-paged AS (
-    SELECT f.* FROM filtered f
-    JOIN guard g ON g.partner_exists AND g.merchant_ok
-    ORDER BY f.id DESC
-    LIMIT (SELECT lim FROM input) OFFSET (SELECT off FROM input)
+paginated_companies AS (
+    SELECT b.*
+    FROM base_companies b
+    JOIN input i ON TRUE
+    WHERE i.cursor_id = 0
+       OR EXISTS (
+            SELECT 1 FROM cursor_row c
+            WHERE b.order_count < c.order_count
+               OR (b.order_count = c.order_count AND b.company_name > c.company_name)
+               OR (b.order_count = c.order_count
+                   AND b.company_name = c.company_name
+                   AND b.company_id > c.company_id)
+       )
+    ORDER BY b.order_count DESC, b.company_name ASC, b.company_id ASC
+    LIMIT (SELECT lim FROM input)
 ),
-orders_data AS (
-    SELECT COALESCE(json_agg(order_obj ORDER BY order_id DESC), '[]'::json) AS orders_json
-    FROM (
-        SELECT b.id AS order_id,
-               json_build_object(
-                   'id', b.id, 'order_ref', b.name, 'state', b.state,
-                   'delivery_status', NULLIF(b.superapp_order_status, ''),
-                   'date_order', CASE WHEN b.date_order IS NULL THEN NULL
-                       ELSE TO_CHAR(b.date_order, 'YYYY-MM-DD HH24:MI:SS') END,
-                   'total_price', b.total_price, 'delivery_type', b."deliveryType",
-                   'merchant', json_build_object(
-                       'merchant', b.merchant, 'name', b.company_name, 'logo', b.logo_url,
-                       'lat', b.lat_location, 'lng', b.lng_location,
-                       'parent', CASE WHEN b.parent_name IS NOT NULL AND b.parent_name <> '' THEN b.parent_name ELSE b.company_name END,
-                       'branch', b.company_name,
-                       'phone', CASE WHEN b.company_phone IS NULL OR b.company_phone = '' THEN NULL
-                           ELSE REPLACE(REPLACE(b.company_phone, '+251', '0'), ' ', '') END,
-                       'location', CASE WHEN b.company_id IS NULL THEN NULL
-                           ELSE CONCAT_WS(', ', NULLIF(b.street,''), NULLIF(b.city,''),
-                               COALESCE(NULLIF(b.state_name,''), 'False'), NULLIF(b.country_name,'')) END
-                   ),
-                   'driver_info', CASE WHEN b."deliveryType" = 'delivery' THEN json_build_object(
-                       'driver_name', b.driver_name, 'driver_mobile', b.driver_mobile,
-                       'driver_email', b.driver_email, 'delivery_medium', b.driver_delivery_medium)
-                       ELSE '{}'::json END,
-                   'sale_order_lines', COALESCE(lines.lines_json, '[]'::json)
-               ) AS order_obj
-        FROM paged b
-        LEFT JOIN LATERAL (
-            SELECT json_agg(json_build_object(
-                'id', sol.id, 'product_id', sol.product_id,
-                'product_name', CASE WHEN sol.product_id IS NOT NULL THEN
-                    CASE WHEN attrs.attributes IS NOT NULL AND attrs.attributes <> ''
-                        THEN CONCAT(COALESCE(pt.name->>'en_US', pt.name::text), ' (', attrs.attributes, ')')
-                        ELSE COALESCE(pt.name->>'en_US', pt.name::text, '') END
-                    ELSE COALESCE(NULLIF(sol.name, ''), '') END,
-                'qty', sol.product_uom_qty, 'uom', u.name->>'en_US',
-                'price_unit', ROUND(sol.price_unit::numeric, 2),
-                'line_amount', ROUND(sol.price_total::numeric, 2),
-                'product_image', NULLIF(TRIM(COALESCE(pp.image_1920_url, pt.image_1920_url, '')), '')
-            )) AS lines_json
-            FROM sale_order_line sol
-            LEFT JOIN product_product pp ON pp.id = sol.product_id
-            LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
-            LEFT JOIN uom_uom u ON u.id = sol.product_uom
-            LEFT JOIN (
-                SELECT pvc.product_product_id,
-                       string_agg(pav.name->>'en_US', ', ' ORDER BY pa.sequence) AS attributes
-                FROM product_variant_combination pvc
-                JOIN product_template_attribute_value ptav ON ptav.id = pvc.product_template_attribute_value_id
-                JOIN product_attribute_value pav ON pav.id = ptav.product_attribute_value_id
-                JOIN product_attribute pa ON pa.id = pav.attribute_id
-                WHERE pvc.product_product_id IN (SELECT DISTINCT product_id FROM sale_order_line WHERE order_id = b.id)
-                GROUP BY pvc.product_product_id
-            ) attrs ON attrs.product_product_id = pp.id
-            WHERE sol.order_id = b.id
-        ) lines ON true
-    ) orders
+aggregated_results AS (
+    SELECT COALESCE(
+        json_agg(
+            json_build_object(
+                'company_id', pc.company_id,
+                'company_name', pc.company_name,
+                'merchant', pc.merchant,
+                'logo_url', pc.logo_url,
+                'order_count', pc.order_count,
+                'item_count', COALESCE(items.item_count, 0)
+            ) ORDER BY pc.order_count DESC, pc.company_name ASC, pc.company_id ASC
+        ),
+        '[]'::json
+    ) AS results_json
+    FROM paginated_companies pc
+    LEFT JOIN LATERAL (
+        SELECT COUNT(sol.id)::int AS item_count
+        FROM sale_order_line sol
+        JOIN sale_order so2 ON so2.id = sol.order_id
+        WHERE so2.partner_id = (SELECT id FROM partner)
+          AND so2.is_superapp_order = TRUE
+          AND so2.superapp_order_status != 'cancelled'
+          AND so2.company_id = pc.company_id
+    ) items ON true
 )
-SELECT g.partner_exists, g.merchant_ok, g.total_count, od.orders_json
-FROM guard g CROSS JOIN orders_data od;
+SELECT
+    EXISTS(SELECT 1 FROM partner) AS partner_exists,
+    (SELECT results_json FROM aggregated_results);
 ```
+
 
 
 
@@ -128,7 +107,8 @@ FROM guard g CROSS JOIN orders_data od;
 
 
 Path: merchant, order_id
-$1=order_id $2=merchant
+$1 = order_id
+$2 = merchant
 
 
 ```sql
@@ -143,7 +123,7 @@ WITH base AS (
         so."deliveryType" AS delivery_type, so.date_order,
         dp.ecommerce_float_price AS delivery_price,
         rc.id AS company_id, rc.name AS company_name, rc.merchant AS company_merchant,
-        NULLIF(TRIM(COALESCE(rc.logo_web, rp.image_1920_url, '')), '') AS logo_url,
+        NULLIF(TRIM(COALESCE(rc.logo_url, rp.image_1920_url, '')), '') AS logo_url,
         rc.lat_location AS lat, rc.lng_location AS lng, rc.phone AS company_phone,
         rp.street, rp.city, rs.name AS state_name, rco.name->>'en_US' AS country_name
     FROM sale_order so
@@ -183,7 +163,9 @@ LEFT JOIN LATERAL (
         JOIN product_template_attribute_value ptav ON ptav.id = pvc.product_template_attribute_value_id
         JOIN product_attribute_value pav ON pav.id = ptav.product_attribute_value_id
         JOIN product_attribute pa ON pa.id = pav.attribute_id
-        WHERE pvc.product_product_id IN (SELECT DISTINCT product_id FROM sale_order_line WHERE order_id = b.order_id)
+        WHERE pvc.product_product_id IN (
+            SELECT DISTINCT product_id FROM sale_order_line WHERE order_id = b.order_id
+        )
         GROUP BY pvc.product_product_id
     ) attrs ON attrs.product_product_id = pp.id
     WHERE sol.order_id = b.order_id
@@ -193,56 +175,89 @@ LEFT JOIN LATERAL (
 
 
 
+
 ## Endpoint 3 — GET /api/v1/product/{product_id}/reviews
 
 
 
-Path: product_id
-Query: page, per_page
-$1=product_id $2=per_page $3=offset
+Path: product_id   (product_template.id — not variant id)
+Query: cursor, per_page (default 20)
 
+Bind params:
+  $1 = product_id
+  $2 = fetch_limit       (per_page + 1)
+  $3 = cursor_id         (0 on first page; else last review id)
+
+
+**Cursor rule:** `pr.id < cursor_id`, sort `pr.id DESC`.
 
 ```sql
-WITH product_check AS (
-    SELECT EXISTS(SELECT 1 FROM product_template WHERE id = $1) AS exists
+WITH input AS (
+    SELECT
+        $1::int AS product_id,
+        $2::int AS lim,
+        $3::int AS cursor_id
+),
+product_check AS (
+    SELECT EXISTS(
+        SELECT 1 FROM product_template pt
+        JOIN input i ON pt.id = i.product_id
+    ) AS exists
 ),
 base AS (
-    SELECT pr.id, COALESCE(rp.name, 'Anonymous') AS user_name, rp.app_user_id,
-           pr.rating, COALESCE(pr.review, '') AS review,
-           TO_CHAR(pr.create_date, 'DD TMMonth YYYY') AS create_date
-    FROM product_review pr
+    SELECT
+        pr.id,
+        COALESCE(rp.name, 'Anonymous') AS user_name,
+        rp.app_user_id,
+        pr.rating,
+        COALESCE(pr.review, '') AS review,
+        TO_CHAR(pr.create_date, 'DD TMMonth YYYY') AS create_date
+    FROM input i
+    JOIN product_review pr ON pr.product_template = i.product_id
     LEFT JOIN res_partner rp ON rp.id = pr.user_id
-    WHERE pr.product_template = $1
+    WHERE i.cursor_id = 0 OR pr.id < i.cursor_id
     ORDER BY pr.id DESC
-    LIMIT $2 OFFSET $3
-),
-total_reviews AS (
-    SELECT COUNT(*) AS c FROM product_review WHERE product_template = $1
+    LIMIT (SELECT lim FROM input)
 ),
 aggregated_reviews AS (
-    SELECT json_agg(json_build_object(
-        'id', b.id, 'user_name', b.user_name,
-        'user_id', CASE WHEN b.app_user_id IS NOT NULL AND b.app_user_id != ''
-            THEN to_jsonb(b.app_user_id) ELSE to_jsonb(false) END,
-        'rating', COALESCE(NULLIF(b.rating, ''), '0')::int,
-        'review', b.review, 'create_date', b.create_date,
-        'replys', COALESCE(replies.replies_json, '[]'::json)
-    ) ORDER BY b.id DESC) AS reviews_json
+    SELECT COALESCE(
+        json_agg(
+            json_build_object(
+                'id', b.id,
+                'user_name', b.user_name,
+                'user_id', CASE
+                    WHEN b.app_user_id IS NOT NULL AND b.app_user_id != ''
+                    THEN to_jsonb(b.app_user_id)
+                    ELSE to_jsonb(false)
+                END,
+                'rating', COALESCE(NULLIF(b.rating, ''), '0')::int,
+                'review', b.review,
+                'create_date', b.create_date,
+                'replys', COALESCE(replies.replies_json, '[]'::json)
+            )
+            ORDER BY b.id DESC
+        ),
+        '[]'::json
+    ) AS reviews_json
     FROM base b
     LEFT JOIN LATERAL (
-        SELECT json_agg(json_build_object(
-            'reply_from', COALESCE(rp2.name, 'Dev Team'),
-            'reply', COALESCE(rr.reply, ''),
-            'reply_date', TO_CHAR(rr.create_date, 'DD TMMonth YYYY')
-        ) ORDER BY rr.id ASC) AS replies_json
+        SELECT json_agg(
+            json_build_object(
+                'reply_from', COALESCE(rp2.name, 'Dev Team'),
+                'reply', COALESCE(rr.reply, ''),
+                'reply_date', TO_CHAR(rr.create_date, 'DD TMMonth YYYY')
+            ) ORDER BY rr.id ASC
+        ) AS replies_json
         FROM review_reply rr
         LEFT JOIN res_partner rp2 ON rp2.id = rr.user_id
         WHERE rr.review_id = b.id
     ) replies ON true
 )
-SELECT (SELECT exists FROM product_check), (SELECT c FROM total_reviews),
-       COALESCE((SELECT reviews_json FROM aggregated_reviews), '[]'::json);
+SELECT
+    (SELECT exists FROM product_check),
+    (SELECT reviews_json FROM aggregated_reviews);
 ```
+
 
 
 
@@ -251,8 +266,8 @@ SELECT (SELECT exists FROM product_check), (SELECT c FROM total_reviews),
 
 
 Query: app_user_id, product_id
-$1=app_user_id $2=product_id
-
+$1 = app_user_id
+$2 = product_id   (product_product.id — variant id)
 
 ```sql
 WITH partner AS (
@@ -2408,49 +2423,127 @@ LEFT JOIN branch_payload bp
 
 ## Endpoint 22 — GET /api/v1/wishlist/{user_id}
 
-Path: user_id
-Query: page, per_page, min_price, max_price, category_id, high_to_low, order
-$1=app_user_id $2=min_price $3=max_price [$4=category_id] $N=per_page $N+1=offset
-Returns: partner_exists, total_count, item rows (one null row when empty)
 
+Path: user_id          (res_partner.app_user_id)
+Query: cursor, per_page, min_price, max_price, category_id, high_to_low, order
+
+Defaults: per_page=10, min_price=0, max_price=10000000
+
+
+ **Sort modes**
+
+| Condition | Sort | Cursor predicate |
+|---|---|---|
+| Default (no `high_to_low`, no `order`) | `wishlist.id DESC` | `cursor_id = 0 OR f.id < cursor_id` |
+| `high_to_low=true/1/yes` or `order` present | `price DESC, id DESC` | keyset on `(price, id)` — see below |
+| `high_to_low=false/0/no` | `price ASC, id ASC` | keyset on `(price, id)` |
+| `order=asc` (without high_to_low) | `price ASC, id ASC` | keyset on `(price, id)` |
+| other `order` value | `price DESC, id DESC` | keyset on `(price, id)` |
+
+**Important:** `cursor` is always the last **`wishlist.id`** from the previous page, even when sorting by price. Do not change sort/filter between pages.
+
+Bind params (no category)
+
+$1 = app_user_id
+$2 = min_price
+$3 = max_price
+$4 = fetch_limit       (per_page + 1)
+$5 = cursor_id         (0 on first page)
+
+
+**Bind params (with category_id)**
+
+
+$1 = app_user_id
+$2 = min_price
+$3 = max_price
+$4 = category_id
+$5 = fetch_limit
+$6 = cursor_id
+
+
+Add to `filtered` WHERE: `AND pt.ecomerce_category_id = $4`
+
+Price-sort cursor predicates
+
+After resolving `cursor_row` (`SELECT id, price FROM filtered WHERE id = cursor_id`):
+
+**DESC:** `(price < cursor.price) OR (price = cursor.price AND id < cursor.id)`  
+**ASC:** `(price > cursor.price) OR (price = cursor.price AND id > cursor.id)`
+
+SQL template (default sort: id DESC)
+
+Replace `$4`/`$5` with `$5`/`$6` when using `category_id`.
 
 ```sql
-WITH partner AS (
-    SELECT id FROM res_partner WHERE app_user_id = $1 LIMIT 1
+WITH input AS (
+    SELECT
+        $1::text AS app_user_id,
+        $2::float8 AS min_price,
+        $3::float8 AS max_price,
+        $4::int AS lim,
+        $5::int AS cursor_id
+),
+partner AS (
+    SELECT id FROM res_partner WHERE app_user_id = (SELECT app_user_id FROM input) LIMIT 1
 ),
 guard AS (
     SELECT EXISTS(SELECT 1 FROM partner) AS partner_exists
 ),
 filtered AS (
-    SELECT wl.id, pt.id AS product_id,
-           COALESCE(pt.name->>'en_US', pt.name::text) AS name,
-           wl.ecommerce_float_price AS price, pt.company_id,
-           COALESCE(pt.image_1920_url, '') AS product_image
+    SELECT
+        wl.id,
+        pt.id AS product_id,
+        COALESCE(pt.name->>'en_US', pt.name::text) AS name,
+        wl.ecommerce_float_price AS price,
+        pt.company_id,
+        COALESCE(pt.image_1920_url, '') AS product_image
     FROM partner
     JOIN wishlist wl ON wl.user_id = partner.id
     JOIN product_template pt ON pt.id = wl.product_id
     LEFT JOIN res_company rc ON rc.id = pt.company_id
-    WHERE wl.user_id = partner.id AND wl.is_active = TRUE AND rc.cps_enabled = TRUE
-      AND wl.ecommerce_float_price >= $2 AND wl.ecommerce_float_price <= $3
-      -- AND pt.ecomerce_category_id = $4
+    WHERE wl.user_id = partner.id
+      AND wl.is_active = TRUE
+      AND rc.cps_enabled = TRUE
+      AND wl.ecommerce_float_price >= $2
+      AND wl.ecommerce_float_price <= $3
+      -- optional: AND pt.ecomerce_category_id = $4
+),
+cursor_row AS (
+    SELECT f.id, f.price
+    FROM filtered f
+    JOIN input i ON TRUE
+    WHERE i.cursor_id <> 0 AND f.id = i.cursor_id
+    LIMIT 1
 ),
 base AS (
-    SELECT f.* FROM filtered f
-    ORDER BY id DESC
-    LIMIT $4 OFFSET $5
+    SELECT f.*
+    FROM filtered f
+    JOIN input i ON TRUE
+    WHERE i.cursor_id = 0 OR f.id < i.cursor_id   -- replace when price sorting
+    ORDER BY f.id DESC                             -- replace when price sorting
+    LIMIT (SELECT lim FROM input)
 )
-SELECT g.partner_exists,
-       COALESCE((SELECT COUNT(*)::int FROM filtered), 0) AS total_count,
-       b.id, b.product_id, b.name,
-       COALESCE(rev.avg_rating, 0.0)::numeric AS avg_rating, rev.total_review,
-       (SELECT COUNT(*) FROM product_product pp WHERE pp.product_tmpl_id = b.product_id AND pp.active = TRUE) AS total_variants,
-       b.price, b.product_image,
-       CASE WHEN disc_all.discount_sum IS NOT NULL
-             OR (COALESCE(disc_listed.cnt, 0) = 0 AND loy.discount_sum IS NOT NULL)
-           THEN COALESCE(disc_all.discount_sum, 0) + CASE WHEN COALESCE(disc_listed.cnt, 0) = 0
-               THEN COALESCE(loy.discount_sum, 0) ELSE 0 END
-           ELSE NULL END AS discounts,
-       COALESCE(disc_listed.discount_json, loy.discount_json) AS loyalty_programs
+SELECT
+    g.partner_exists,
+    b.id,
+    b.product_id,
+    b.name,
+    COALESCE(rev.avg_rating, 0.0)::numeric AS avg_rating,
+    rev.total_review,
+    (SELECT COUNT(*) FROM product_product pp
+     WHERE pp.product_tmpl_id = b.product_id AND pp.active = TRUE) AS total_variants,
+    b.price,
+    b.product_image,
+    CASE
+        WHEN disc_all.discount_sum IS NOT NULL
+          OR (COALESCE(disc_listed.cnt, 0) = 0 AND loy.discount_sum IS NOT NULL)
+        THEN COALESCE(disc_all.discount_sum, 0)
+           + CASE WHEN COALESCE(disc_listed.cnt, 0) = 0
+                  THEN COALESCE(loy.discount_sum, 0) ELSE 0 END
+        ELSE NULL
+    END AS discounts,
+    COALESCE(disc_listed.discount_json, loy.discount_json) AS loyalty_programs
 FROM guard g
 LEFT JOIN base b ON g.partner_exists
 LEFT JOIN LATERAL (
@@ -2469,9 +2562,12 @@ LEFT JOIN LATERAL (
 ) disc_all ON b.product_id IS NOT NULL
 LEFT JOIN LATERAL (
     SELECT COUNT(*)::int AS cnt,
-           json_agg(json_build_object('name', d.name, 'discount_type', INITCAP(d.discount_type),
+           json_agg(json_build_object(
+               'name', d.name, 'discount_type', INITCAP(d.discount_type),
                'discount_value', d.discount_value::text,
-               'start_date', TO_CHAR(d.start_date, 'DD/MM/YY'), 'end_date', TO_CHAR(d.end_date, 'DD/MM/YY'))) AS discount_json
+               'start_date', TO_CHAR(d.start_date, 'DD/MM/YY'),
+               'end_date', TO_CHAR(d.end_date, 'DD/MM/YY')
+           )) AS discount_json
     FROM product_discount d
     WHERE d.product_tmpl_id = b.product_id AND d.is_active = TRUE AND d.company_id IS NOT NULL
       AND d.x_superapp_approval_status = 'approved'
@@ -2481,21 +2577,27 @@ LEFT JOIN LATERAL (
 LEFT JOIN LATERAL (
     SELECT SUM(ROUND((CASE WHEN lr.discount_mode = 'percent'
         THEN b.price - (b.price * lr.discount / 100) ELSE b.price - lr.discount END)::numeric, 2)) AS discount_sum,
-           json_agg(json_build_object('name', lp.name->>'en_US',
-               'discount_type', CASE WHEN lr.discount_mode = 'percent' THEN 'Percentage' ELSE INITCAP(lr.discount_mode) END,
+           json_agg(json_build_object(
+               'name', lp.name->>'en_US',
+               'discount_type', CASE WHEN lr.discount_mode = 'percent' THEN 'Percentage'
+                   ELSE INITCAP(lr.discount_mode) END,
                'discount_value', lr.discount::text,
-               'start_date', TO_CHAR(lp.date_from, 'DD/MM/YY'), 'end_date', TO_CHAR(lp.date_to, 'DD/MM/YY'))) AS discount_json
+               'start_date', TO_CHAR(lp.date_from, 'DD/MM/YY'),
+               'end_date', TO_CHAR(lp.date_to, 'DD/MM/YY')
+           )) AS discount_json
     FROM loyalty_program lp
     JOIN loyalty_reward lr ON lr.program_id = lp.id
     WHERE COALESCE(disc_listed.cnt, 0) = 0
-      AND lp.id = (SELECT lp2.id FROM loyalty_program lp2
+      AND lp.id = (
+          SELECT lp2.id FROM loyalty_program lp2
           WHERE lp2.company_id = b.company_id AND lp2.is_ecommerce = TRUE
             AND lp2.x_superapp_approval_status = 'approved'
             AND (lp2.date_from IS NULL OR lp2.date_from <= CURRENT_DATE)
             AND (lp2.date_to IS NULL OR lp2.date_to >= CURRENT_DATE)
-          ORDER BY lp2.id LIMIT 1)
+          ORDER BY lp2.id LIMIT 1
+      )
 ) loy ON b.product_id IS NOT NULL
-ORDER BY b.id DESC;
+ORDER BY b.id DESC;   -- match base sort
 ```
 
 ## Endpoint 23 — GET /api/v1/driver/orders
