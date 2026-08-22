@@ -1,7 +1,6 @@
 -------------------------------------------------------------------------------
 -- GET /api/v1/total_products
 -- GET /api/v1/{{merchant}}/products
-
 --
 -- v3: fixes remaining divergences from the ORM implementation
 -- (total_list_products) that v2 left in place. Every fix below is flagged
