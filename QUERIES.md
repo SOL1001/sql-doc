@@ -2777,73 +2777,50 @@ ORDER BY c.id ASC;
 ## Endpoint 27 — GET /api/v1/categories/{category_id:int}
 
 ```sql
-WITH params AS (
-    SELECT NULL::int AS category_id
-),
-target_category AS (
-    SELECT
-        c.id,
-        c.name,
-        c.complete_name,
-        c.parent_id,
-        c.image_1_url,
-        c.category_banner_url,
-        c.product_count
-    FROM product_ecomerce_categories c
-    JOIN params p ON p.category_id = c.id
-    WHERE c.active IS TRUE
-),
-children AS (
-    SELECT
-        c.id,
-        c.name,
-        c.complete_name,
-        c.image_1_url,
-        c.category_banner_url
-    FROM product_ecomerce_categories c
-    JOIN target_category tc ON tc.id = c.parent_id
-    WHERE c.active IS TRUE
-),
-children_json AS (
-    SELECT
-        COALESCE(
-            JSONB_AGG(
-                JSONB_BUILD_OBJECT(
-                    'id', c.id,
-                    'name', COALESCE(c.name, ''),
-                    'complete_name', COALESCE(c.complete_name, ''),
-                    'image', NULLIF(c.image_1_url, ''),
-                    'banner', NULLIF(c.category_banner_url, '')
-                )
-                ORDER BY c.id
-            ),
-            '[]'::jsonb
-        ) AS children
-    FROM children c
-)
+-- EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
 SELECT
-    tc.id,
-    COALESCE(tc.name, '') AS name,
-    NULLIF(tc.image_1_url, '') AS image,
+    c.id,
+    COALESCE(c.name, '') AS name,
+    NULLIF(c.image_1_url, '') AS image,
     CASE
-        WHEN tc.parent_id IS NOT NULL THEN
-            JSONB_BUILD_OBJECT(
-                'id', parent.id,
-                'name', COALESCE(parent.name, ''),
-                'complete_name', COALESCE(parent.complete_name, ''),
-                'image', NULLIF(parent.image_1_url, ''),
-                'banner', NULLIF(parent.category_banner_url, '')
+        WHEN c.parent_id IS NOT NULL
+        THEN (
+            SELECT JSONB_BUILD_OBJECT(
+                'id', p.id,
+                'name', COALESCE(p.name, ''),
+                'complete_name', COALESCE(p.complete_name, ''),
+                'image', NULLIF(p.image_1_url, ''),
+                'banner', NULLIF(p.category_banner_url, '')
             )
+            FROM product_ecomerce_categories p
+            WHERE p.id = c.parent_id
+        )
         ELSE NULL
     END AS parent_category,
-    cj.children AS child_categories,
-    (SELECT COUNT(*)::int FROM children) AS child_count,
-    COALESCE(tc.product_count, 0) AS items
-FROM target_category tc
-LEFT JOIN product_ecomerce_categories parent
-    ON parent.id = tc.parent_id
-CROSS JOIN children_json cj;
-
+    COALESCE(children.children, '[]'::jsonb) AS child_categories,
+    COALESCE(children.child_count, 0) AS child_count,
+    COALESCE(c.product_count, 0) AS items
+FROM product_ecomerce_categories c
+LEFT JOIN LATERAL (
+    SELECT
+        JSONB_AGG(
+            JSONB_BUILD_OBJECT(
+                'id', child.id,
+                'name', COALESCE(child.name, ''),
+                'complete_name', COALESCE(child.complete_name, ''),
+                'image', NULLIF(child.image_1_url, ''),
+                'banner', NULLIF(child.category_banner_url, '')
+            )
+            ORDER BY child.id
+        ) AS children,
+        COUNT(*)::int AS child_count
+    FROM product_ecomerce_categories child
+    WHERE child.parent_id = c.id
+      AND child.active IS TRUE
+) children ON TRUE
+WHERE c.id = %s -- catgoryid 1
+  AND c.active IS TRUE
+LIMIT 1;
 ```
 
 
