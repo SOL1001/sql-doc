@@ -1259,7 +1259,7 @@ LIMIT %s;
 
 ```sql
 WITH merchant_stats AS (
-    SELECT 
+    SELECT
         rc.id,
         rc.name,
         rc.merchant,
@@ -1271,39 +1271,49 @@ WITH merchant_stats AS (
         rc.phone,
         rc.parent_id,
         prc.merchant AS parent_merchant,
-        
+
         (
-            SELECT COUNT(*) 
-            FROM product_template pt 
-            WHERE pt.company_id = rc.id 
-              AND pt.active = true 
-              AND pt.sale_ok = true          
-              AND pt.x_superapp_approval_status = 'approved'     
-        ) AS product_template_count,
-        
-        (
-            SELECT COUNT(*) 
-            FROM product_product pp 
-            INNER JOIN product_template pt ON pp.product_tmpl_id = pt.id 
-            WHERE pt.company_id = rc.id 
-              AND pp.active = true 
+            SELECT COUNT(*)
+            FROM product_template pt
+            WHERE pt.company_id = rc.id
               AND pt.active = true
-              AND pt.sale_ok = true 
-              AND  pt.x_superapp_approval_status = 'approved'  
+              AND pt.sale_ok = true
+              AND pt.x_superapp_approval_status = 'approved'
+        ) AS product_template_count,
+
+        (
+            SELECT COUNT(*)
+            FROM product_product pp
+            INNER JOIN product_template pt
+                ON pp.product_tmpl_id = pt.id
+            WHERE pt.company_id = rc.id
+              AND pp.active = true
+              AND pt.active = true
+              AND pt.sale_ok = true
+              AND pt.x_superapp_approval_status = 'approved'
         ) AS product_variant_count
 
-    FROM res_company rc 
-    LEFT JOIN res_company prc ON rc.parent_id = prc.id
-    LEFT JOIN company_business_type cbt ON cbt.id = rc.business_type_id
-    WHERE 
-        (rc.name ILIKE %s --'%afri%' 
-		OR rc.merchant ILIKE %s --'%afri%'
-		)
-        AND rc.cps_enabled = true
+    FROM res_company rc
+    LEFT JOIN res_company prc
+        ON rc.parent_id = prc.id
+    LEFT JOIN company_business_type cbt
+        ON cbt.id = rc.business_type_id
+
+    WHERE (
+        rc.name ILIKE '%a%'
+        OR rc.merchant ILIKE '%a%'
+    )
+    AND rc.cps_enabled = true
+    AND (
+        
+         rc.id > %(cursor_id)
+    )
+
+    ORDER BY rc.id ASC
+    LIMIT %(lim)
 )
-SELECT 
+SELECT
     json_build_object(
-        'count', (SELECT COUNT(*) FROM merchant_stats),
         'status', 'success',
         'merchants', COALESCE(
             json_agg(
@@ -1322,8 +1332,9 @@ SELECT
                     'product_template_count', ms.product_template_count,
                     'product_variant_count', ms.product_variant_count
                 )
-            ), 
-            '[]'::json 
+                ORDER BY ms.id ASC
+            ),
+            '[]'::json
         )
     ) AS response
 FROM merchant_stats ms;
@@ -1333,24 +1344,21 @@ FROM merchant_stats ms;
 
 ```sql
 SELECT json_build_object(
-'query','co',
+    'query', %s,
 
     'merchants_count',
     (
         SELECT COUNT(DISTINCT rc.id)
         FROM res_company rc
-
         LEFT JOIN product_template pt
             ON pt.company_id = rc.id
-
-        WHERE
-            (
-                rc.name ILIKE %s -- '%co%'
-                OR rc.merchant ILIKE  %s --'%co%'
-            )
-            AND rc.cps_enabled = TRUE
-            AND rc.is_delivery = FALSE
-            AND pt.x_superapp_approval_status = 'approved'
+        WHERE (
+            rc.name ILIKE %s
+            OR rc.merchant ILIKE %s
+        )
+        AND rc.cps_enabled = TRUE
+        AND rc.is_delivery = FALSE
+        AND pt.x_superapp_approval_status = 'approved'
     ),
 
     'merchants',
@@ -1372,30 +1380,22 @@ SELECT json_build_object(
                     prc.merchant AS parent_merchant,
                     COUNT(DISTINCT pt.id) AS product_template_count,
                     COUNT(DISTINCT pp.id) AS product_variant_count
-
                 FROM res_company rc
-
                 LEFT JOIN product_template pt
                     ON pt.company_id = rc.id
-
+                    AND pt.x_superapp_approval_status = 'approved'
                 LEFT JOIN product_product pp
                     ON pp.product_tmpl_id = pt.id
-
                 LEFT JOIN res_company prc
                     ON rc.parent_id = prc.id
-
                 LEFT JOIN company_business_type cbt
                     ON cbt.id = rc.business_type_id
-
-                WHERE
-                    (
-                        rc.name ILIKE  %s --'%co%'
-                        OR rc.merchant ILIKE  %s --'%co%'
-                    )
-                    AND rc.cps_enabled = TRUE
-                    AND rc.is_delivery = FALSE
-                    AND pt.x_superapp_approval_status = 'approved'
-
+                WHERE (
+                    rc.name ILIKE %s
+                    OR rc.merchant ILIKE %s
+                )
+                AND rc.cps_enabled = TRUE
+                AND rc.is_delivery = FALSE
                 GROUP BY
                     rc.id,
                     rc.name,
@@ -1408,30 +1408,29 @@ SELECT json_build_object(
                     rc.phone,
                     rc.parent_id,
                     prc.merchant
-
+                ORDER BY rc.id ASC
+                LIMIT %(lim)
             ) company
         ),
         '[]'::json
     ),
+
     'products_total',
     (
         SELECT COUNT(DISTINCT pt.id)
         FROM res_company rc
-
         LEFT JOIN product_template pt
             ON pt.company_id = rc.id
-
-        WHERE
-              COALESCE(
-                        pt.name->>'en_US',
-                        pt.name->>'en',
-                        ''
-                    ) ILIKE  %s --'%co%'
-            
-            AND rc.cps_enabled = TRUE
-            AND rc.is_delivery = FALSE
-            AND pt.x_superapp_approval_status = 'approved'
+        WHERE COALESCE(
+            pt.name->>'en_US',
+            pt.name->>'en',
+            ''
+        ) ILIKE %s
+        AND rc.cps_enabled = TRUE
+        AND rc.is_delivery = FALSE
+        AND pt.x_superapp_approval_status = 'approved'
     ),
+
     'products',
     COALESCE(
         (
@@ -1439,60 +1438,49 @@ SELECT json_build_object(
             FROM (
                 SELECT
                     pt.id,
-
                     COALESCE(
                         pt.name->>'en_US',
                         pt.name->>'en',
                         ''
                     ) AS name,
-
                     pt.image_1920_url AS image_url,
                     pt.ecommerce_float_price AS list_price,
-
                     json_build_object(
                         'id', rc.id,
                         'name', rc.name,
                         'merchant', rc.merchant,
                         'logo', rc.logo_url
                     ) AS company,
-
                     pt.average_rating,
-
                     COUNT(pr.id) AS total_reviews
-
                 FROM product_template pt
-
                 JOIN res_company rc
                     ON rc.id = pt.company_id
-
                 LEFT JOIN product_review pr
                     ON pr.product_template = pt.id
-
-                WHERE
-                    COALESCE(
-                        pt.name->>'en_US',
-                        pt.name->>'en',
-                        ''
-                    ) ILIKE %s --'%co%'
-
-                    AND rc.cps_enabled = TRUE
-                    AND rc.is_delivery = FALSE
-                    AND pt.x_superapp_approval_status = 'approved'
-
-                GROUP BY
-                    pt.id,
-                    rc.id
-
+                WHERE COALESCE(
+                    pt.name->>'en_US',
+                    pt.name->>'en',
+                    ''
+                ) ILIKE %s
+                AND rc.cps_enabled = TRUE
+                AND rc.is_delivery = FALSE
+                AND pt.x_superapp_approval_status = 'approved'
+                GROUP BY pt.id, rc.id
+                ORDER BY pt.id ASC
+                LIMIT %(lim)
             ) product
         ),
         '[]'::json
     ),
-'categories_count',
+
+    'categories_count',
     (
         SELECT COUNT(DISTINCT pec.id)
-        FROM product_ecomerce_categories pec 
-		WHERE pec.name ILIKE %s --'%co%'
+        FROM product_ecomerce_categories pec
+        WHERE pec.name ILIKE %s
     ),
+
     'categories',
     COALESCE(
         (
@@ -1503,17 +1491,14 @@ SELECT json_build_object(
                     pec.name,
                     pec.complete_name,
                     pec.image_1_url
-
                 FROM product_ecomerce_categories pec
-
-                WHERE
-                    pec.name ILIKE %s --'%co%'
-
+                WHERE pec.name ILIKE %s
+                ORDER BY pec.id ASC
+                LIMIT %(lim)
             ) category
         ),
         '[]'::json
     )
-
 ) AS result;
 ```
 
