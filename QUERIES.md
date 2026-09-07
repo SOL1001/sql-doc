@@ -1543,14 +1543,6 @@ SELECT
     COUNT(pt.id) AS items,
     parent.id AS parent_id,
     parent.name AS parent_name
-SELECT
-    pec.id,
-    pec.name,
-    pec.complete_name,
-    pec.image_1_url AS image,
-    COUNT(pt.id) AS items,
-    parent.id AS parent_id,
-    parent.name AS parent_name
 FROM product_ecomerce_categories pec
 LEFT JOIN product_template pt
     ON pt.ecomerce_category_id = pec.id
