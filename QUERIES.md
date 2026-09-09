@@ -18,83 +18,203 @@ Bind params:
 
 ```sql
 WITH input AS (
-    SELECT
-        $1::text AS app_user_id,
-        $2::int  AS lim,
-        $3::int  AS cursor_id
-),
-partner AS (
-    SELECT p.id
-    FROM res_partner p
-    JOIN input i ON TRUE
-    WHERE p.app_user_id = i.app_user_id
-      AND p.active = TRUE
-    LIMIT 1
-),
-base_companies AS (
-    SELECT
-        rc.id AS company_id,
-        rc.name AS company_name,
-        rc.merchant AS merchant,
-        NULLIF(TRIM(COALESCE(rc.logo_url, rp.image_1920_url, '')), '') AS logo_url,
-        COUNT(so.id)::int AS order_count
-    FROM partner p
-    JOIN sale_order so ON so.partner_id = p.id AND so.is_superapp_order = TRUE
-    JOIN res_company rc ON rc.id = so.company_id
-    LEFT JOIN res_partner rp ON rp.id = rc.partner_id
-    GROUP BY rc.id, rc.name, rc.merchant, rc.logo_url, rp.image_1920_url
-),
-cursor_row AS (
-    SELECT b.order_count, b.company_name, b.company_id
-    FROM base_companies b
-    JOIN input i ON TRUE
-    WHERE i.cursor_id <> 0 AND b.company_id = i.cursor_id
-    LIMIT 1
-),
-paginated_companies AS (
-    SELECT b.*
-    FROM base_companies b
-    JOIN input i ON TRUE
-    WHERE i.cursor_id = 0
-       OR EXISTS (
-            SELECT 1 FROM cursor_row c
-            WHERE b.order_count < c.order_count
-               OR (b.order_count = c.order_count AND b.company_name > c.company_name)
-               OR (b.order_count = c.order_count
-                   AND b.company_name = c.company_name
-                   AND b.company_id > c.company_id)
-       )
-    ORDER BY b.order_count DESC, b.company_name ASC, b.company_id ASC
-    LIMIT (SELECT lim FROM input)
-),
-aggregated_results AS (
-    SELECT COALESCE(
-        json_agg(
-            json_build_object(
-                'company_id', pc.company_id,
-                'company_name', pc.company_name,
-                'merchant', pc.merchant,
-                'logo_url', pc.logo_url,
-                'order_count', pc.order_count,
-                'item_count', COALESCE(items.item_count, 0)
-            ) ORDER BY pc.order_count DESC, pc.company_name ASC, pc.company_id ASC
-        ),
-        '[]'::json
-    ) AS results_json
-    FROM paginated_companies pc
-    LEFT JOIN LATERAL (
-        SELECT COUNT(sol.id)::int AS item_count
-        FROM sale_order_line sol
-        JOIN sale_order so2 ON so2.id = sol.order_id
-        WHERE so2.partner_id = (SELECT id FROM partner)
-          AND so2.is_superapp_order = TRUE
-          AND so2.superapp_order_status != 'cancelled'
-          AND so2.company_id = pc.company_id
-    ) items ON true
-)
-SELECT
-    EXISTS(SELECT 1 FROM partner) AS partner_exists,
-    (SELECT results_json FROM aggregated_results);
+	    SELECT
+	        $1::text AS app_user_id,
+	        $2::text AS merchant_filter,
+	        $3::text AS history,
+	        $4::int  AS lim,
+	        $5::int  AS cursor_id
+	),
+	partner AS (
+	    SELECT p.id
+	    FROM res_partner p
+	    JOIN input i ON TRUE
+	    WHERE p.app_user_id = i.app_user_id
+	      AND p.active = TRUE
+	    LIMIT 1
+	),
+	merchant_company AS (
+	    SELECT c.id
+	    FROM res_company c
+	    JOIN input i ON TRUE
+	    WHERE i.merchant_filter <> ''
+	      AND c.merchant = i.merchant_filter
+	      AND c.is_delivery = FALSE
+	      AND c.merchant IS NOT NULL
+	    LIMIT 1
+	),
+	filtered AS (
+	    SELECT
+	        so.id,
+	        so.name,
+	        so.state,
+	        so.superapp_order_status,
+	        so.date_order,
+	        ROUND(so.amount_total::numeric, 2)             AS total_price,
+	        so."deliveryType",
+	        so.driver_name,
+	        so.driver_mobile,
+	        so.driver_email,
+	        so.driver_delivery_medium,
+	        rc.id                                          AS company_id,
+	        rc.merchant,
+	        rc.name                                        AS company_name,
+	        NULLIF(TRIM(COALESCE(rc.logo_url, rp.image_1920_url, '')), '') AS logo_url,
+	        rc.lat_location,
+	        rc.lng_location,
+	        rc.phone                                       AS company_phone,
+	        rp.street,
+	        rp.city,
+	        rcs.name                                       AS state_name,
+	        rco.name->>'en_US'                             AS country_name,
+	        rcp.name                                       AS parent_name
+	    FROM input i
+	    JOIN partner p ON TRUE
+	    JOIN sale_order so ON so.partner_id = p.id
+	                      AND so.is_superapp_order = TRUE
+	    LEFT JOIN res_company         rc  ON rc.id  = so.company_id
+	    LEFT JOIN res_partner         rp  ON rp.id  = rc.partner_id
+	    LEFT JOIN res_country_state   rcs ON rcs.id = rp.state_id
+	    LEFT JOIN res_country         rco ON rco.id = rp.country_id
+	    LEFT JOIN res_company         rcp ON rcp.id = rc.parent_id
+	    WHERE (i.merchant_filter = '' OR so.company_id = (SELECT id FROM merchant_company))
+	      AND (
+	          i.history = '' OR i.history = 'all'
+	          OR (i.history = 'active'
+	              AND so.superapp_order_status NOT IN ('cancelled', 'delivered'))
+	          OR (i.history = 'inactive'
+	              AND so.superapp_order_status IN ('delivered', 'cancelled'))
+	      )
+	),
+	guard AS (
+	    SELECT
+	        EXISTS(SELECT 1 FROM partner) AS partner_exists,
+	        CASE
+	            WHEN (SELECT merchant_filter FROM input) = '' THEN TRUE
+	            ELSE EXISTS(SELECT 1 FROM merchant_company)
+	        END AS merchant_ok
+	),
+	paged AS (
+	    SELECT f.*
+	    FROM filtered f
+	    JOIN guard g ON g.partner_exists AND g.merchant_ok
+	    WHERE (SELECT cursor_id FROM input) = 0
+	       OR f.id < (SELECT cursor_id FROM input)
+	    ORDER BY f.id DESC
+	    LIMIT (SELECT lim FROM input)
+	),
+	orders_data AS (
+	    SELECT COALESCE(
+	        json_agg(order_obj ORDER BY order_id DESC),
+	        '[]'::json
+	    ) AS orders_json
+	    FROM (
+	        SELECT
+	            b.id AS order_id,
+	            json_build_object(
+	                'id', b.id,
+	                'order_ref', b.name,
+	                'state', b.state,
+	                'delivery_status', NULLIF(b.superapp_order_status, ''),
+	                'date_order', CASE
+	                    WHEN b.date_order IS NULL THEN NULL
+	                    ELSE TO_CHAR(b.date_order, 'YYYY-MM-DD HH24:MI:SS')
+	                END,
+	                'total_price', b.total_price,
+	                'delivery_type', b."deliveryType",
+	                'merchant', json_build_object(
+	                    'merchant', b.merchant,
+	                    'name', b.company_name,
+	                    'logo', b.logo_url,
+	                    'lat', b.lat_location,
+	                    'lng', b.lng_location,
+	                    'parent', CASE
+	                        WHEN b.parent_name IS NOT NULL AND b.parent_name <> ''
+	                            THEN b.parent_name
+	                        ELSE b.company_name
+	                    END,
+	                    'branch', b.company_name,
+	                    'phone', CASE
+	                        WHEN b.company_phone IS NULL OR b.company_phone = '' THEN NULL
+	                        ELSE REPLACE(REPLACE(b.company_phone, '+251', '0'), ' ', '')
+	                    END,
+	                    'location', CASE
+	                        WHEN b.company_id IS NULL THEN NULL
+	                        ELSE CONCAT_WS(
+	                            ', ',
+	                            NULLIF(b.street, ''),
+	                            NULLIF(b.city, ''),
+	                            COALESCE(NULLIF(b.state_name, ''), 'False'),
+	                            NULLIF(b.country_name, '')
+	                        )
+	                    END
+	                ),
+	                'driver_info', CASE
+	                    WHEN b."deliveryType" = 'delivery' THEN json_build_object(
+	                        'driver_name', b.driver_name,
+	                        'driver_mobile', b.driver_mobile,
+	                        'driver_email', b.driver_email,
+	                        'delivery_medium', b.driver_delivery_medium
+	                    )
+	                    ELSE '{}'::json
+	                END,
+	                'sale_order_lines', COALESCE(lines.lines_json, '[]'::json)
+	            ) AS order_obj
+	        FROM paged b
+	        LEFT JOIN LATERAL (
+	            SELECT json_agg(
+	                json_build_object(
+	                    'id', sol.id,
+	                    'product_id', sol.product_id,
+	                    'product_name', CASE
+	                        WHEN sol.product_id IS NOT NULL THEN
+	                            CASE
+	                                WHEN attrs.attributes IS NOT NULL AND attrs.attributes <> ''
+	                                    THEN CONCAT(
+	                                        COALESCE(pt.name->>'en_US', pt.name::text),
+	                                        ' (', attrs.attributes, ')'
+	                                    )
+	                                ELSE COALESCE(pt.name->>'en_US', pt.name::text, '')
+	                            END
+	                        ELSE COALESCE(NULLIF(sol.name, ''), '')
+	                    END,
+	                    'qty', sol.product_uom_qty,
+	                    'uom', u.name->>'en_US',
+	                    'price_unit', ROUND(sol.price_unit::numeric, 2),
+	                    'line_amount', ROUND(sol.price_total::numeric, 2),
+	                    'product_image', NULLIF(
+	                        TRIM(COALESCE(pp.image_1920_url, pt.image_1920_url, '')),
+	                        ''
+	                    )
+	                )
+	            ) AS lines_json
+	            FROM sale_order_line sol
+	            LEFT JOIN product_product pp  ON pp.id  = sol.product_id
+	            LEFT JOIN product_template pt ON pt.id  = pp.product_tmpl_id
+	            LEFT JOIN uom_uom u           ON u.id   = sol.product_uom
+	            LEFT JOIN (
+	                SELECT
+	                    pvc.product_product_id,
+	                    string_agg(pav.name->>'en_US', ', ' ORDER BY pa.sequence) AS attributes
+	                FROM product_variant_combination pvc
+	                JOIN product_template_attribute_value ptav ON ptav.id = pvc.product_template_attribute_value_id
+	                JOIN product_attribute_value pav ON pav.id = ptav.product_attribute_value_id
+	                JOIN product_attribute pa ON pa.id = pav.attribute_id
+	                WHERE pvc.product_product_id IN (
+	                    SELECT DISTINCT product_id FROM sale_order_line WHERE order_id = b.id
+	                )
+	                GROUP BY pvc.product_product_id
+	            ) attrs ON attrs.product_product_id = pp.id
+	            WHERE sol.order_id = b.id
+	        ) lines ON true
+	    ) orders
+	)
+	SELECT
+	    g.partner_exists,
+	    g.merchant_ok,
+	    od.orders_json
+	FROM guard g
+	CROSS JOIN orders_data od
 ```
 
 
@@ -290,49 +410,92 @@ SELECT EXISTS(SELECT 1 FROM partner) AS partner_exists,
 
 
 
-Query: app_user_id, page, per_page
-$1=app_user_id $2=per_page $3=offset
+Query: app_user_id, lim, cursor_id
+
 
 
 ```sql
-WITH partner AS (
-    SELECT id FROM res_partner WHERE app_user_id = $1 AND active = TRUE LIMIT 1
-),
-base_companies AS (
-    SELECT rc.id AS company_id, rc.name AS company_name, rc.merchant AS merchant,
-           NULLIF(TRIM(COALESCE(rc.logo_web, rp.image_1920_url, '')), '') AS logo_url,
-           COUNT(so.id) AS order_count
-    FROM sale_order so
-    JOIN res_company rc ON rc.id = so.company_id
-    LEFT JOIN res_partner rp ON rp.id = rc.partner_id
-    WHERE so.partner_id = (SELECT id FROM partner) AND so.is_superapp_order = TRUE
-    GROUP BY rc.id, rc.name, rc.merchant, rc.logo_web, rp.image_1920_url
-),
-total_count AS (SELECT COUNT(*) AS c FROM base_companies),
-paginated_companies AS (
-    SELECT * FROM base_companies ORDER BY order_count DESC, company_name ASC
-    LIMIT $2 OFFSET $3
-),
-aggregated_results AS (
-    SELECT json_agg(json_build_object(
-        'company_id', pc.company_id, 'company_name', pc.company_name,
-        'merchant', pc.merchant, 'logo_url', pc.logo_url,
-        'order_count', pc.order_count, 'item_count', COALESCE(items.item_count, 0)
-    ) ORDER BY pc.order_count DESC, pc.company_name ASC) AS results_json
-    FROM paginated_companies pc
-    LEFT JOIN LATERAL (
-        SELECT COUNT(sol.id)::int AS item_count
-        FROM sale_order_line sol
-        JOIN sale_order so2 ON so2.id = sol.order_id
-        WHERE so2.partner_id = (SELECT id FROM partner)
-          AND so2.is_superapp_order = TRUE
-          AND so2.superapp_order_status != 'cancelled'
-          AND so2.company_id = pc.company_id
-    ) items ON true
-)
-SELECT EXISTS(SELECT 1 FROM partner) AS partner_exists,
-       COALESCE((SELECT c FROM total_count), 0) AS total,
-       COALESCE((SELECT results_json FROM aggregated_results), '[]'::json);
+WITH input AS (
+	    SELECT
+	        $1::text AS app_user_id,
+	        $2::int  AS lim,
+	        $3::int  AS cursor_id
+	),
+	partner AS (
+	    SELECT p.id
+	    FROM res_partner p
+	    JOIN input i ON TRUE
+	    WHERE p.app_user_id = i.app_user_id
+	      AND p.active = TRUE
+	    LIMIT 1
+	),
+	base_companies AS (
+	    SELECT
+	        rc.id                            AS company_id,
+	        rc.name                          AS company_name,
+	        rc.merchant                      AS merchant,
+	        NULLIF(TRIM(COALESCE(rc.logo_url, rp.image_1920_url, '')), '') AS logo_url,
+	        COUNT(so.id)::int                AS order_count
+	    FROM partner p
+	    JOIN sale_order so ON so.partner_id = p.id
+	                      AND so.is_superapp_order = TRUE
+	    JOIN res_company rc ON rc.id = so.company_id
+	    LEFT JOIN res_partner rp ON rp.id = rc.partner_id
+	    GROUP BY rc.id, rc.name, rc.merchant, rc.logo_url, rp.image_1920_url
+	),
+	cursor_row AS (
+	    SELECT b.order_count, b.company_name, b.company_id
+	    FROM base_companies b
+	    JOIN input i ON TRUE
+	    WHERE i.cursor_id <> 0
+	      AND b.company_id = i.cursor_id
+	    LIMIT 1
+	),
+	paginated_companies AS (
+	    SELECT b.*
+	    FROM base_companies b
+	    JOIN input i ON TRUE
+	    WHERE i.cursor_id = 0
+	       OR EXISTS (
+	            SELECT 1
+	            FROM cursor_row c
+	            WHERE b.order_count < c.order_count
+	               OR (b.order_count = c.order_count AND b.company_name > c.company_name)
+	               OR (b.order_count = c.order_count
+	                   AND b.company_name = c.company_name
+	                   AND b.company_id > c.company_id)
+	       )
+	    ORDER BY b.order_count DESC, b.company_name ASC, b.company_id ASC
+	    LIMIT (SELECT lim FROM input)
+	),
+	aggregated_results AS (
+	    SELECT COALESCE(
+	        json_agg(
+	            json_build_object(
+	                'company_id', pc.company_id,
+	                'company_name', pc.company_name,
+	                'merchant', pc.merchant,
+	                'logo_url', pc.logo_url,
+	                'order_count', pc.order_count,
+	                'item_count', COALESCE(items.item_count, 0)
+	            ) ORDER BY pc.order_count DESC, pc.company_name ASC, pc.company_id ASC
+	        ),
+	        '[]'::json
+	    ) AS results_json
+	    FROM paginated_companies pc
+	    LEFT JOIN LATERAL (
+	        SELECT COUNT(sol.id)::int AS item_count
+	        FROM sale_order_line sol
+	        JOIN sale_order so2 ON so2.id = sol.order_id
+	        WHERE so2.partner_id = (SELECT id FROM partner)
+	          AND so2.is_superapp_order = TRUE
+	          AND so2.superapp_order_status != 'cancelled'
+	          AND so2.company_id = pc.company_id
+	    ) items ON true
+	)
+	SELECT
+	    EXISTS(SELECT 1 FROM partner) AS partner_exists,
+	    (SELECT results_json FROM aggregated_results)
 ```
 
 
