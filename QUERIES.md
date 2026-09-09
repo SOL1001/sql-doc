@@ -7,14 +7,15 @@
 
 
 
-**Query:** app_user_id (required), cursor, per_page (default 10)
 
 Bind params:  
  $1 = app_user_id
- $2 = fetch_limit       (per_page + 1)
- $3 = cursor_id         (0 on first page; else last company_id from previous page)
+ $2 = merchant_filter       
+ $3 = history
+ $4 = limit
+ $5 = cursor_id         
 
-**Cursor rule:** keyset on `(order_count DESC, company_name ASC, company_id ASC)`. The cursor value is **`company_id`**; look up that row's `order_count` and `company_name` for the keyset comparison.
+
 
 ```sql
 WITH input AS (
