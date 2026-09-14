@@ -1636,7 +1636,7 @@ SELECT
     pt.ecommerce_float_price AS list_price,
     pt.image_1920_url AS image_url,
     pt.average_rating,
-    COALESCE(pt.reviews_count, 0) AS total_reviews,
+    COALESCE(pt.total_reviews, 0) AS total_reviews,
     json_build_object(
         'id', rc.id,
         'name', rc.name,
@@ -1651,7 +1651,7 @@ WHERE COALESCE(
     pt.name->>'en_US',
     pt.name->>'en',
     ''
-) ILIKE %s
+) ILIKE  %s --'%e%'
 AND (
     COALESCE(pt.reviews_count, 0),
     pt.id
@@ -1659,7 +1659,7 @@ AND (
 ORDER BY
     COALESCE(pt.reviews_count, 0) DESC,
     pt.id DESC
-LIMIT %s;
+LIMIT %lim;
 ```
 
 ## Endpoint 18 — GET /api/v1/categories/search?query={query:string}
