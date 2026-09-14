@@ -2761,27 +2761,6 @@ LIMIT %lim -- 0;
 ## Endpoint 26 — GET /api/v1/categories
 
 ```sql
-WITH params AS (
-    SELECT
-        NULL::int AS cursor_id,
-        %s::int AS per_page
-),
-paged_categories AS (
-    SELECT
-        c.id,
-        c.name,
-        c.image_1_url,
-        c.category_banner_url,
-        c.product_count,
-        c.description
-    FROM product_ecomerce_categories c
-    CROSS JOIN params p
-    WHERE c.parent_id IS NULL
-      AND c.active IS TRUE
-      AND (p.cursor_id IS NULL OR c.id > p.cursor_id)
-    ORDER BY c.id ASC
-    LIMIT (SELECT LEAST(GREATEST(per_page, 1), 100) + 1 FROM params)
-)
 SELECT
     c.id,
     c.name,
@@ -2789,8 +2768,12 @@ SELECT
     NULLIF(c.category_banner_url, '') AS banner,
     COALESCE(c.product_count, 0) AS items,
     c.description
-FROM paged_categories c
-ORDER BY c.id ASC;
+FROM product_ecomerce_categories c
+WHERE c.parent_id IS NULL
+  AND c.active IS TRUE
+  AND ($1::int IS NULL OR c.id > $1::int)
+ORDER BY c.id ASC
+LIMIT LEAST(GREATEST(COALESCE($2::int, 10), 1), 100) + 1;
 ```
 
 
