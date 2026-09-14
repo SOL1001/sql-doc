@@ -2688,50 +2688,32 @@ LIMIT LEAST(GREATEST(COALESCE($2::int, 10), 1), 100) + 1;
 ## Endpoint 27 — GET /api/v1/categories/{category_id:int}
 
 ```sql
--- EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
 SELECT
     c.id,
-    COALESCE(c.name, '') AS name,
-    NULLIF(c.image_1_url, '') AS image,
-    CASE
-        WHEN c.parent_id IS NOT NULL
-        THEN (
-            SELECT JSONB_BUILD_OBJECT(
-                'id', p.id,
-                'name', COALESCE(p.name, ''),
-                'complete_name', COALESCE(p.complete_name, ''),
-                'image', NULLIF(p.image_1_url, ''),
-                'banner', NULLIF(p.category_banner_url, '')
-            )
-            FROM product_ecomerce_categories p
-            WHERE p.id = c.parent_id
-        )
-        ELSE NULL
-    END AS parent_category,
-    COALESCE(children.children, '[]'::jsonb) AS child_categories,
-    COALESCE(children.child_count, 0) AS child_count,
-    COALESCE(c.product_count, 0) AS items
+    c.name AS name,
+    c.image_1_url AS image,
+    c.product_count AS items,
+    p.id AS parent_id,
+    p.name AS parent_name,
+    p.complete_name AS parent_complete_name,
+    p.image_1_url AS parent_image
 FROM product_ecomerce_categories c
-LEFT JOIN LATERAL (
-    SELECT
-        JSONB_AGG(
-            JSONB_BUILD_OBJECT(
-                'id', child.id,
-                'name', COALESCE(child.name, ''),
-                'complete_name', COALESCE(child.complete_name, ''),
-                'image', NULLIF(child.image_1_url, ''),
-                'banner', NULLIF(child.category_banner_url, '')
-            )
-            ORDER BY child.id
-        ) AS children,
-        COUNT(*)::int AS child_count
-    FROM product_ecomerce_categories child
-    WHERE child.parent_id = c.id
-      AND child.active IS TRUE
-) children ON TRUE
+LEFT JOIN product_ecomerce_categories p
+    ON p.id = c.parent_id
 WHERE c.id = %s -- catgoryid 1
-  AND c.active IS TRUE
-LIMIT 1;
+  AND c.active IS TRUE;
+
+-- get catagory with the catgory id 
+-- "child_categories" : [{}]
+SELECT
+    child.id,
+    child.name AS name,
+    child.complete_name AS complete_name,
+    child.image_1_url AS image,
+    child.category_banner_url AS banner
+FROM product_ecomerce_categories child
+WHERE child.parent_id = 12 -- catgoryid 1
+  AND child.active IS TRUE;
 ```
 
 
@@ -2988,7 +2970,7 @@ LIMIT 1;
 SELECT
     c.id,
     c.name,
-    c.logo_url
+    c.logo_url AS logo
 FROM res_company c
 WHERE c.parent_id IS NULL
   AND c.is_delivery = TRUE
