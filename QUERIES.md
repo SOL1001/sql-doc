@@ -3097,13 +3097,12 @@ LIMIT 1;
 SELECT
     c.id,
     c.name,
-    NULLIF(c.logo_url, '') AS logo
+    c.logo_url
 FROM res_company c
 WHERE c.parent_id IS NULL
   AND c.is_delivery = TRUE
   AND c.cps_enabled = TRUE
   AND c.active = TRUE
-  AND NULLIF(c.merchant, '') IS NOT NULL
-ORDER BY c.id DESC;
+  AND c.merchant IS NOT NULL;
 ```
 
