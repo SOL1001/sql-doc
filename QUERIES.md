@@ -2091,230 +2091,62 @@ ORDER BY
 
 ```sql
 -- EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
-WITH params AS (
-    SELECT
-        NULL::int AS cursor_id,
-        10::int AS per_page,
-        NULL::int AS fetch_limit,
-        NULL::text AS is_featured_param,
-        NULL::text AS is_discount_param,
-        NULL::text AS is_delivery_param
-),
-p AS (
-    SELECT
-        cursor_id,
-        LEAST(GREATEST(per_page, 1), 100) AS per_page,
-        LEAST(GREATEST(COALESCE(fetch_limit, per_page + 1), 1), 1000) AS fetch_limit,
-        CASE
-            WHEN lower(trim(coalesce(is_featured_param, ''))) IN ('true', 'yes', '1') THEN TRUE
-            ELSE FALSE
-        END AS featured_filter,
-        CASE
-            WHEN lower(trim(coalesce(is_discount_param, ''))) IN ('true', 'yes', '1') THEN TRUE
-            WHEN lower(trim(coalesce(is_discount_param, ''))) IN ('false', 'no', '0') THEN FALSE
-            ELSE NULL
-        END AS discount_filter,
-        CASE
-            WHEN lower(trim(coalesce(is_delivery_param, ''))) IN ('true', 'yes', '1') THEN TRUE
-            WHEN lower(trim(coalesce(is_delivery_param, ''))) IN ('false', 'no', '0') THEN FALSE
-            ELSE FALSE
-        END AS delivery_filter
-    FROM params
-),
-active_loyalty_companies AS (
-    SELECT DISTINCT lp.company_id
-    FROM loyalty_program lp
-    CROSS JOIN p
-    WHERE p.discount_filter IS NOT NULL
-      AND lp.is_ecommerce = TRUE
-      AND lp.x_superapp_approval_status = 'approved'
-      AND (lp.date_from IS NULL OR lp.date_from <= CURRENT_DATE)
-      AND (lp.date_to IS NULL OR lp.date_to >= CURRENT_DATE)
-),
-paginated_merchant_ids AS (
-    SELECT c.id
-    FROM res_company c
-    CROSS JOIN p
-    LEFT JOIN active_loyalty_companies alc ON alc.company_id = c.id
-    WHERE c.parent_id IS NULL
-      AND c.merchant IS NOT NULL
-      AND c.merchant <> ''
-      AND c.cps_enabled = TRUE
-      AND c.active = TRUE
-      AND c.is_delivery = p.delivery_filter
-      AND (NOT p.featured_filter OR c.is_featured = TRUE)
-      AND (p.discount_filter IS NULL OR (alc.company_id IS NOT NULL) = p.discount_filter)
-      AND (p.cursor_id IS NULL OR c.id < p.cursor_id)
-    ORDER BY c.id DESC
-    LIMIT (SELECT fetch_limit FROM p)
-),
-paginated_merchants AS (
-    SELECT
-        c.id,
-        c.name,
-        c.merchant,
-        c.logo_url,
-        c.banner_url,
-        c.product_count,
-        c.open_hour,
-        c.open_moment,
-        c.close_hour,
-        c.close_moment,
-        c.cps_account_number,
-        c.business_type_id
-    FROM paginated_merchant_ids pm
-    JOIN res_company c ON c.id = pm.id
-),
-page_loyalty_programs AS (
-    SELECT
-        lp.company_id,
-        lp.id AS program_id,
-        lp.name AS program_name,
-        lp.sequence,
-        ROW_NUMBER() OVER (
-            PARTITION BY lp.company_id
-            ORDER BY lp.sequence, lp.id
-        ) AS loyalty_row_num
-    FROM loyalty_program lp
-    JOIN paginated_merchant_ids pm ON pm.id = lp.company_id
-    WHERE lp.is_ecommerce = TRUE
-      AND lp.x_superapp_approval_status = 'approved'
-      AND (lp.date_from IS NULL OR lp.date_from <= CURRENT_DATE)
-      AND (lp.date_to IS NULL OR lp.date_to >= CURRENT_DATE)
-),
-page_loyalty AS (
-    SELECT
-        plp.company_id,
-        TRUE AS is_discount,
-        json_build_array(
-            json_build_object(
-                'id', plp.program_id,
-                'name', plp.program_name ->> 'en_US',
-                'rewards', COALESCE(
-                    json_agg(
-                        json_build_object(
-                            'discount', lr.discount,
-                            'discount_mode', lr.discount_mode
-                        ) ORDER BY lr.id
-                    ) FILTER (WHERE lr.id IS NOT NULL),
-                    '[]'::json
-                )
-            )
-        ) AS discount
-    FROM page_loyalty_programs plp
-    LEFT JOIN loyalty_reward lr ON lr.program_id = plp.program_id
-    WHERE plp.loyalty_row_num = 1
-    GROUP BY plp.company_id, plp.program_id, plp.program_name
-)
+-- query merchant 
 SELECT
-    pm.merchant AS merchant_id,
-    pm.name,
-    NULLIF(pm.logo_url, '') AS logo,
-    NULLIF(pm.banner_url, '') AS banner,
-    bt.code AS business_type,
-    COALESCE(pm.product_count, 0) AS total_products,
-    CASE
-        WHEN pm.open_hour IS NOT NULL AND pm.open_moment IS NOT NULL THEN
-            LPAD(FLOOR(pm.open_hour)::int::text, 2, '0') || ':' ||
-            LPAD(LEAST(FLOOR((pm.open_hour - FLOOR(pm.open_hour)) * 60)::numeric, 59)::int::text, 2, '0') ||
-            ' ' || UPPER(pm.open_moment)
-        ELSE NULL
-    END AS opening_time,
-    CASE
-        WHEN pm.close_hour IS NOT NULL AND pm.close_moment IS NOT NULL THEN
-            LPAD(FLOOR(pm.close_hour)::int::text, 2, '0') || ':' ||
-            LPAD(LEAST(FLOOR((pm.close_hour - FLOOR(pm.close_hour)) * 60)::numeric, 59)::int::text, 2, '0') ||
-            ' ' || UPPER(pm.close_moment)
-        ELSE NULL
-    END AS closing_time,
-    NULLIF(pm.cps_account_number, '') AS cps_account_number,
-    COALESCE(pl.is_discount, FALSE) AS is_discount,
-    COALESCE(pl.discount, '[]'::json) AS discount
-FROM paginated_merchants pm
-LEFT JOIN company_business_type bt ON bt.id = pm.business_type_id
-LEFT JOIN page_loyalty pl ON pl.company_id = pm.id
-ORDER BY pm.id DESC;
-```
-
-## Endpoint 21 — GET /api/v1/merchant/{merchant}
-
-```sql
-EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
-SELECT
-    c.id, c.name, c.merchant AS merchant_id,
-    (SELECT bt.code FROM company_business_type bt WHERE bt.id = c.business_type_id) AS business_type,
-    NULLIF(c.logo_url, '') AS logo,
+    c.id,
+    c.name,
+    c.merchant AS merchant_id,
+    c.business_type,
+    c.logo_url AS logo,
     COALESCE(c.is_featured, FALSE) AS is_featured,
-    NULLIF(c.banner_url, '') AS banner,
-    CASE
-        WHEN c.open_hour IS NOT NULL AND c.open_moment IS NOT NULL
-        THEN LPAD(FLOOR(c.open_hour)::int::text, 2, '0') || ':' || LPAD(LEAST(FLOOR((c.open_hour - FLOOR(c.open_hour)) * 60)::numeric, 59)::int::text, 2, '0') || ' ' || UPPER(c.open_moment)
-        ELSE NULL
-    END AS opening_time,
-    CASE
-        WHEN c.close_hour IS NOT NULL AND c.close_moment IS NOT NULL
-        THEN LPAD(FLOOR(c.close_hour)::int::text, 2, '0') || ':' || LPAD(LEAST(FLOOR((c.close_hour - FLOOR(c.close_hour)) * 60)::numeric, 59)::int::text, 2, '0') || ' ' || UPPER(c.close_moment)
-        ELSE NULL
-    END AS closing_time,
-    NULLIF(c.cps_account_number, '') AS cps_account_number,
-    NULLIF(c.lat_location, 0) AS lat_location,
-    NULLIF(c.lng_location, 0) AS lng_location,
-    NULLIF(c.map_holder, '') AS map_holder,
-    NULLIF(rp.street, '') AS street,
-    NULLIF(rp.city, '') AS city,
-    NULLIF(c.description, '') AS description,
-    COALESCE(branches.branches, '[]'::jsonb) AS branches,
-    COALESCE(c.product_count, 0) AS product_template_count,
-    COALESCE(c.variant_count, 0) AS product_variant_count
+    c.banner_url AS banner,
+    c.opening_time,
+    c.closing_time,
+    c.cps_account_number,
+    c.lat_location,
+    c.lng_location,
+    c.map_holder,
+    c.street,
+    c.city,
+    c.description,
+    c.product_count AS product_template_count,
+    c.variant_count AS product_variant_count
 FROM res_company c
-LEFT JOIN res_partner rp ON rp.id = c.partner_id
-LEFT JOIN LATERAL (
-    SELECT JSONB_AGG(
-        JSONB_BUILD_OBJECT(
-            'id', b.id,
-            'name', b.name,
-            'branch_id', b.merchant,
-            'logo', b.logo_url,
-            'banner', b.banner_url,
-            'is_featured', COALESCE(b.is_featured, FALSE),
-            'business_type', (SELECT bbt.code FROM company_business_type bbt WHERE bbt.id = b.business_type_id),
-            'opening_time', CASE
-                WHEN b.open_hour IS NOT NULL AND b.open_moment IS NOT NULL
-                THEN LPAD(FLOOR(b.open_hour)::int::text, 2, '0') || ':' || LPAD(LEAST(FLOOR((b.open_hour - FLOOR(b.open_hour)) * 60)::numeric, 59)::int::text, 2, '0') || ' ' || UPPER(b.open_moment)
-                ELSE NULL
-            END,
-            'closing_time', CASE
-                WHEN b.close_hour IS NOT NULL AND b.close_moment IS NOT NULL
-                THEN LPAD(FLOOR(b.close_hour)::int::text, 2, '0') || ':' || LPAD(LEAST(FLOOR((b.close_hour - FLOOR(b.close_hour)) * 60)::numeric, 59)::int::text, 2, '0') || ' ' || UPPER(b.close_moment)
-                ELSE NULL
-            END,
-            'cps_account_number', NULLIF(b.cps_account_number, ''),
-            'email', NULLIF(brp.email, ''),
-            'phone', NULLIF(brp.phone, ''),
-            'lat_location', NULLIF(b.lat_location, 0),
-            'lng_location', NULLIF(b.lng_location, 0),
-            'map_holder', NULLIF(b.map_holder, ''),
-            'street', NULLIF(brp.street, ''),
-            'city', NULLIF(brp.city, ''),
-            'description', NULLIF(b.description, ''),
-            'product_template_count', COALESCE(b.product_count, 0),
-            'product_variant_count', COALESCE(b.variant_count, 0),
-            'is_delivery', COALESCE(b.is_delivery, FALSE),
-            'is_ecommerce', NOT COALESCE(b.is_delivery, FALSE)
-        )
-        ORDER BY b.id
-    ) AS branches
-    FROM res_company b
-    LEFT JOIN res_partner brp ON brp.id = b.partner_id
-    WHERE b.parent_id = c.id
-      AND b.cps_enabled IS TRUE
-      AND COALESCE(b.is_delivery, FALSE) IS FALSE
-      AND b.active IS TRUE
-      AND NULLIF(TRIM(b.merchant), '') IS NOT NULL
-) branches ON TRUE
-WHERE c.merchant = %s::text  --'MRT000016SPR'
+WHERE c.merchant = %s::text  --'MRT000016SPR'  -- 'MRT000016SPR' merchant id
+  AND c.cps_enabled IS TRUE
+  AND c.is_delivery IS NOT TRUE
   AND c.active IS TRUE
 LIMIT 1;
+
+-- query branch for mercant  branches : [{}]
+SELECT
+    b.id,
+    b.name,
+    b.merchant AS branch_id,
+    b.logo_url AS logo,
+    b.banner_url AS banner,
+    COALESCE(b.is_featured, FALSE) AS is_featured,
+    b.business_type AS business_type,
+    b.opening_time AS opening_time,
+    b.closing_time AS closing_time,
+    b.cps_account_number AS cps_account_number,
+    b.email AS email,
+    b.phone AS phone,
+    b.lat_location AS lat_location,
+    b.lng_location AS lng_location,
+    b.map_holder AS map_holder,
+    b.street AS street,
+    b.city AS city,
+    b.description AS description,
+    b.product_count AS product_template_count,
+    b.variant_count AS product_variant_count
+FROM res_company b
+WHERE b.parent_id = $2 -- Primary Key - Id from the first query merchant 
+  AND b.cps_enabled IS TRUE
+  AND b.active IS TRUE
+  AND b.merchant IS NOT NULL;
+
+
 ```
 
 ## Endpoint 22 — GET /api/v1/wishlist/{user_id}
