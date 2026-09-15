@@ -2537,7 +2537,8 @@ WHERE dop.id = %do_id; --50;
 
 ** USE `pickup_from` data from delivery_order response **
 
-``` SQL
+
+```
 SELECT 
 c.id,
 c.name,
@@ -2550,13 +2551,14 @@ FROM res_company c
 LEFT JOIN res_partner rp ON rp.id = c.partner_id
 LEFT JOIN res_country_state rcs ON rcs.id = rp.state_id
 WHERE c.id = %pickup_from;
+
+
 ```
 
 ## 24.4 Customer Info
 
-** use `customer_id` from derivery_order response 
-
-```SQL 
+** use `customer_id` from derivery_order response **
+```
 SELECT 
 c.name,
 c.phone,
@@ -2564,7 +2566,9 @@ cs.name AS location
 FROM res_partner c
 LEFT JOIN res_country_state cs ON c.state_id = cs.id
 WHERE c.id = %customer_id; --280;
+
 ```
+
 
 
 ## Endpoint 25 — GET /api/v1/driver/history
