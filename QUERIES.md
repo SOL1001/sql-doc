@@ -2115,8 +2115,8 @@ SELECT
     c.lat_location,
     c.lng_location,
     c.map_holder,
-    c.street,
-    c.city,
+    c.street_str AS street,
+    c.city_str AS city,
     c.description,
     c.product_count AS product_template_count,
     c.variant_count AS product_variant_count
@@ -2144,8 +2144,8 @@ SELECT
     b.lat_location AS lat_location,
     b.lng_location AS lng_location,
     b.map_holder AS map_holder,
-    b.street AS street,
-    b.city AS city,
+    b.street_str AS street,
+    b.city_str AS city,
     b.description AS description,
     b.product_count AS product_template_count,
     b.variant_count AS product_variant_count
