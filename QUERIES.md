@@ -2426,57 +2426,58 @@ SELECT
     dop.id,
     dop.name AS order_id,
     iso.superapp_order_status AS status,
-    order_comp.logo_url AS logo,
-    dop_partner.name AS "from",
-    COALESCE(order_partner.street, '') || ', ' ||
-    COALESCE(order_partner.city, '') || ' ' ||
-    COALESCE(rcs.name, '') AS pickup_location,
-    to_char(dop.delivery_date, 'MM/DD/YYYY') AS delivery_date,
-    json_build_object(
-        'images', COALESCE(
-            json_agg(pt.image_1920_url) FILTER (WHERE pt.image_1920_url IS NOT NULL),
-            '[]'::json
-        ),
-        'number', COUNT(dol.id)
-    ) AS items
+    dop.order_company_id AS order_from,
+    to_char(dop.delivery_date, 'MM/DD/YYYY') AS delivery_date
+    
 FROM delivery_order dop
 INNER JOIN res_partner rp
     ON rp.id = dop.driver_assigned
 INNER JOIN res_users ru
     ON ru.partner_id = rp.id
-LEFT JOIN res_partner dop_partner
-    ON dop_partner.id = dop.partner_id
-LEFT JOIN res_company order_comp
-    ON order_comp.name = dop_partner.name         
-LEFT JOIN res_partner order_partner
-    ON order_partner.id = order_comp.partner_id
-LEFT JOIN res_country_state rcs
-    ON order_partner.state_id = rcs.id
-LEFT JOIN delivery_order_line dol
-    ON dol.delivery_order_id = dop.id
-LEFT JOIN product_product pt
-    ON dol.product_variant_id = pt.id
+	
 LEFT JOIN sale_order iso
     ON iso.id = dop.sale_order_id::integer
 WHERE
     ru.token = %s --'98db652e5c1d9e6e0c1a8eb4abb669fa'
     AND ru.token_expiration_time > NOW()
     AND dop.state IN ('driver', 'picked')
-    AND dop.id < %cursor_id
-GROUP BY
-    dop.id,
-    dop.name,
-    iso.superapp_order_status,
-    order_comp.logo_url,
-    dop_partner.name,
-    order_partner.street,
-    order_partner.city,
-    rcs.name,
-    dop.delivery_date
+     dop.id < %cursor_id
+
 ORDER BY dop.id DESC
 LIMIT %lim;
 ```
 
+
+## 23.2 - GET ordered company info 
+
+** use `order_from` from orders
+
+```
+SELECT 
+c.name,
+c.logo_url as logo,
+rp.street,
+rp.city,
+rcs.name AS pickup_location
+FROM res_company c 
+LEFT JOIN res_partner rp ON rp.id = c.partner_id
+LEFT JOIN res_country_state rcs ON rp.state_id = rcs.id
+WHERE c.id = %order_from; --26;
+```
+
+
+## 23.3  Get Ordered Products images
+
+** use `id` from orders **
+
+```
+SELECT 
+pp.image_1920_url
+FROM delivery_order_line dol
+INNER JOIN delivery_order dop ON dop.id = dol.delivery_order_id
+LEFT JOIN product_product pp ON dol.product_variant_id = pp.id
+WHERE dop.id = %id; --59;
+```
 
 ## Endpoint 24 — GET /api/v1/driver/order/{order_id:int}
 
@@ -2571,7 +2572,7 @@ WHERE c.id = %customer_id; --280;
 
 
 
-## Endpoint 25 — GET /api/v1/driver/history
+## 25 — GET /api/v1/driver/history
 
 **Driver History List**
 
@@ -2581,30 +2582,37 @@ token: from request header `x-token`
 SELECT
     dop.id,
     dop.name AS order_no,
-    json_build_object(
-        'name', order_comp.name,
-        'branch', order_partner.street
-    ) AS pickup_from,
+   dop.order_company_id AS pickup_from,
     to_char(dop.delivery_date, 'MM/DD/YYYY') AS date,
-    dop.state AS status
+    iso.superapp_order_status AS status
 FROM delivery_order dop
+LEFT JOIN sale_order iso
+    ON iso.id = dop.sale_order_id::integer
 INNER JOIN res_partner rp
     ON rp.id = dop.driver_assigned
 INNER JOIN res_users ru
-    ON ru.partner_id = rp.id
-LEFT JOIN res_partner dop_partner
-    ON dop_partner.id = dop.partner_id
-LEFT JOIN res_company order_comp
-    ON order_comp.name = dop_partner.name        
-LEFT JOIN res_partner order_partner
-    ON order_partner.id = order_comp.partner_id
-WHERE
+    ON ru.partner_id = rp.id       
+WHERE 
     ru.token = %token -- '98db652e5c1d9e6e0c1a8eb4abb669fa'
     AND ru.token_expiration_time > NOW()
     AND dop.state IN ('delivered', 'canceled')
     AND dop.id < %cursor_id --1000
 ORDER BY dop.id DESC
 LIMIT %lim; --10;
+```
+
+## 25.2 Ordered Company info
+
+** use `pickup_from` from order ** 
+
+```
+SELECT 
+c.name,
+rp.street 
+FROM res_company c 
+LEFT JOIN res_partner rp ON rp.id = c.partner_id
+WHERE c.id = %pickup_from; -- 26;
+
 ```
 
 ## Endpoint 26 — GET /api/v1/categories
