@@ -549,78 +549,17 @@ SELECT
     c.superapp_sale_count AS total_sold_qty,
     c.image_1_url AS image,
     c.superapp_sale_count,
-    COUNT(pt.id) AS product_count
+    c.product_count AS product_count
 FROM product_ecomerce_categories c
-LEFT JOIN product_template pt
-    ON pt.ecomerce_category_id = c.id
-WHERE c.superapp_sale_count > 0 AND (c.id,c.superapp_sale_count) < (%cursor_id,%cursor_super_app_sale_count)
-GROUP BY
-    c.id,
-    c.name,
-    c.superapp_sale_count,
-    c.image_1_url
+
+WHERE c.superapp_sale_count > 0 
+AND (c.id,c.superapp_sale_count) < (%cursor_id,%cursor_super_app_sale_count)
+
 ORDER BY c.superapp_sale_count DESC
 LIMIT %lim; --10; 
 ```
 
-## Endpoint 9 — GET /api/v1/popular_categories/{merchant_id:string}
 
-```sql
-WITH merchant_company AS (
-    SELECT id
-    FROM res_company
-    WHERE merchant = %s
-    LIMIT 1
-),
-
-category_sales AS (
-    SELECT
-        sol.category_id,
-        COUNT(sol.id) AS total_sold_qty
-    FROM sale_order_line sol
-    JOIN sale_order so
-        ON so.id = sol.order_id
-    JOIN res_company rc
-        ON rc.id = so.company_id
-    WHERE rc.merchant = %s
-      AND so.is_superapp_order = TRUE
-      AND so.superapp_order_status = 'delivered'
-      AND sol.category_id IS NOT NULL
-    GROUP BY sol.category_id
-)
-
-SELECT
-    c.id AS category_id,
-    c.name AS category_name,
-    COUNT(pt.id) AS product_count,
-    cs.total_sold_qty,
-    c.image_url AS image
-FROM category_sales cs
-JOIN product_ecomerce_categories c
-    ON c.id = cs.category_id
-CROSS JOIN merchant_company mc
-LEFT JOIN product_template pt
-    ON pt.ecomerce_category_id = c.id
-    AND (
-        pt.company_id = mc.id
-        OR pt.company_id IN (
-            SELECT id
-            FROM res_company
-            WHERE parent_id = mc.id
-        )
-    )
-WHERE
-    (cs.id,cs.total_sold_qty) < %s
-GROUP BY
-    c.id,
-    c.name,
-    c.image_1_url,
-    cs.total_sold_qty
-ORDER BY
-    cs.total_sold_qty DESC,
-    c.id DESC
-LIMIT %lim;
-```
 
 
 ## Endpoint 10 — GET /api/v1/popular_products
@@ -2566,67 +2505,85 @@ LIMIT %lim;
 token: from request header `x-token`
 
 ```sql
-SELECT
-    dop.id,
-    dop.name AS ref_no,
-    iso.superapp_order_status AS status,
-    json_build_object(
-        'id',    order_comp.id,
-        'name',  order_comp.name,
-        'logo',  order_comp.logo_url,
-        'phone', order_comp.phone
-    ) AS pickup_from,
-    COALESCE(order_partner.street, '') || ', ' ||
-    COALESCE(order_partner.city, '') || ' ' ||
-    COALESCE(rcs.name, '') AS pickup_location,
-    to_char(dop.delivery_date, 'MM/DD/YYYY') AS delivery_date,
-    dop.delivery_pickup_code,
-    json_build_object(
-        'lat', dop.delivery_lat,
-        'lng', dop.delivery_long
-    ) AS coordinates,
-    dop.customer_location,
-    json_build_object(
-        'name',     customer.name,
-        'phone',    customer.phone,
-        'location', customer_state.name
-    ) AS customer_info,
-    dop.delivery_notes AS additional_note,
-    COALESCE((
-    SELECT json_agg(
-        json_build_object(
-            'id',          dol.id,
-            'name',        pt.name->>'en_US',
-            'image',       pt.image_1920_url,
-            'quantity',    dol.quantity,
-            'uom',         uom.name->>'en_US',
-            'description', dol.description
-        )
-    )
-    FROM delivery_order_line dol
-    LEFT JOIN uom_uom uom 
-        ON dol.uom = uom.id
-    LEFT JOIN product_product pp 
-        ON dol.product_variant_id = pp.id
-    LEFT JOIN product_template pt 
-        ON pp.product_tmpl_id = pt.id
-    WHERE dol.delivery_order_id = dop.id
-), '[]'::json) AS items
+-- EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
+SELECT 
+dop.id,
+dop.name AS ref_no,
+dop.state AS status,
+dop.order_company_id AS pickup_from,
+to_char(dop.delivery_date, 'MM/DD/YYYY') AS delivery_date,
+dop.delivery_pickup_code,
+dop.delivery_lat AS lat,
+dop.delivery_long AS lng,
+dop.customer_location,
+dop.customer_id AS custoemr_id,
+dop.delivery_notes AS additional_note
+
 FROM delivery_order dop
-INNER JOIN res_partner rp ON rp.id = dop.driver_assigned
-INNER JOIN res_users ru ON ru.partner_id = rp.id
-LEFT JOIN res_partner dop_partner ON dop_partner.id = dop.partner_id
-LEFT JOIN res_company order_comp ON order_comp.name = dop_partner.name
-LEFT JOIN res_partner order_partner ON order_partner.id = order_comp.partner_id
-LEFT JOIN res_country_state rcs ON order_partner.state_id = rcs.id
-LEFT JOIN sale_order iso ON iso.id = dop.sale_order_id::integer
-LEFT JOIN res_partner customer ON customer.id = dop.customer_id
-LEFT JOIN res_country_state customer_state ON customer.state_id = customer_state.id
-WHERE
-    ru.token = %s
+INNER JOIN res_users ru ON dop.driver_assigned = ru.partner_id
+WHERE 
+ ru.token = %s --'98db652e5c1d9e6e0c1a8eb4abb669fa'
     AND ru.token_expiration_time > NOW()
    AND dop.state IN ('driver', 'picked')
-    AND dop.id = %id; --50;
+   AND dop.id = %s; --50;
+```
+
+## Endpint 24.2 - GET DELIVEY ORDER LINES
+
+** Delivery order lines query by the delivery order id **
+
+do_id = delivery order id
+
+```sql
+SELECT 
+dol.id AS id,
+pt.name->>'en_US' AS name,
+pp.image_1920_url AS image,
+dol.quantity AS quantity,
+dol.uom_name->>'en_US' AS uom,
+dol.description
+FROM delivery_order_line dol
+INNER JOIN delivery_order dop ON dol.delivery_order_id = dop.id
+LEFT JOIN uom_uom uom 
+        ON dol.uom = uom.id
+LEFT JOIN product_product pp 
+	ON dol.product_variant_id = pp.id
+LEFT JOIN product_template pt 
+	ON pp.product_tmpl_id = pt.id
+WHERE dop.id = %do_id; --50;
+```
+
+## 24.3 Get Order Company 
+
+** USE `pickup_from` data from delivery_order response **
+
+``` SQL
+SELECT 
+c.id,
+c.name,
+c.logo_url AS logo,
+c.phone,
+rp.street,
+rp.city,
+rcs.name
+FROM res_company c 
+LEFT JOIN res_partner rp ON rp.id = c.partner_id
+LEFT JOIN res_country_state rcs ON rcs.id = rp.state_id
+WHERE c.id = %pickup_from;
+```
+
+## 24.4 Customer Info
+
+** use `customer_id` from derivery_order response 
+
+```SQL 
+SELECT 
+c.name,
+c.phone,
+cs.name AS location
+FROM res_partner c
+LEFT JOIN res_country_state cs ON c.state_id = cs.id
+WHERE c.id = %customer_id; --280;
 ```
 
 
