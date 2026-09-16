@@ -8,100 +8,73 @@
 
 
 
-Bind params:  
- $1 = app_user_id
- $2 = merchant_filter       
- $3 = history
- $4 = limit
- $5 = cursor_id         
+**Step 1 — resolve customer partner**    
+```
+SELECT id
+	FROM res_partner
+	WHERE app_user_id = $1
+	  AND active = TRUE
+	LIMIT 1
+```
 
+**Step 2 — resolve merchant company (when merchant filter is provided)**
+```
+SELECT id
+	FROM res_company
+	WHERE merchant = $1
+	  AND is_delivery = FALSE
+	  AND merchant IS NOT NULL
+	LIMIT 1
+```
+**Step 3 — page order ids (limit applies to orders, not line rows)**
 
+```
+q := `
+	SELECT id
+	FROM sale_order
+	WHERE partner_id = $1
+	  AND is_superapp_order = TRUE
+	  AND ($2 = 0 OR company_id = $2)
+	  AND ($4 = 0 OR id < $4)
+	`
+	switch history {
+	case "active":
+		q += `
+	  AND superapp_order_status NOT IN ('cancelled', 'delivered')
+	`
+	case "inactive":
+		q += `
+	  AND superapp_order_status IN ('delivered', 'cancelled')
+	`
+	}
+	q += `
+	ORDER BY id DESC
+	LIMIT $3
+	`
+```
+**Step 4a — order fields only (PK lookup, no company joins)**
+```
+SELECT
+	    id                     AS order_id,
+	    name                   AS order_ref,
+	    state                  AS order_state,
+	    superapp_order_status  AS delivery_status,
+	    date_order             AS date_order,
+	    amount_total           AS total_price,
+	    "deliveryType"         AS delivery_type,
+	    driver_name            AS driver_name,
+	    driver_mobile          AS driver_mobile,
+	    driver_email           AS driver_email,
+	    driver_delivery_medium AS delivery_medium,
+	    company_id             AS company_id
+	FROM sale_order
+	WHERE id = ANY($1::int[])
+	ORDER BY id DESC
+```
 
-```sql
-WITH input AS (
-	    SELECT
-	        $1::text AS app_user_id,
-	        $2::text AS merchant_filter,
-	        $3::text AS history,
-	        $4::int  AS lim,
-	        $5::int  AS cursor_id
-	),
-	partner AS (
-	    SELECT p.id AS partner_id
-	    FROM res_partner p
-	    JOIN input i ON TRUE
-	    WHERE p.app_user_id = i.app_user_id
-	      AND p.active = TRUE
-	    LIMIT 1
-	),
-	merchant_company AS (
-	    SELECT c.id AS company_id
-	    FROM res_company c
-	    JOIN input i ON TRUE
-	    WHERE i.merchant_filter <> ''
-	      AND c.merchant = i.merchant_filter
-	      AND c.is_delivery = FALSE
-	      AND c.merchant IS NOT NULL
-	    LIMIT 1
-	),
-	guard AS (
-	    SELECT
-	        EXISTS(SELECT 1 FROM partner) AS partner_exists,
-	        CASE
-	            WHEN (SELECT merchant_filter FROM input) = '' THEN TRUE
-	            ELSE EXISTS(SELECT 1 FROM merchant_company)
-	        END AS merchant_ok
-	),
-	paged_ids AS MATERIALIZED (
-	    SELECT so.id AS order_id
-	    FROM input i
-	    JOIN partner p ON TRUE
-	    JOIN guard g ON g.partner_exists AND g.merchant_ok
-	    JOIN sale_order so ON so.partner_id = p.partner_id
-	                      AND so.is_superapp_order = TRUE
-	    WHERE (i.merchant_filter = '' OR so.company_id = (SELECT company_id FROM merchant_company))
-	      AND (
-	          i.history = '' OR i.history = 'all'
-	          OR (i.history = 'active'
-	              AND so.superapp_order_status NOT IN ('cancelled', 'delivered'))
-	          OR (i.history = 'inactive'
-	              AND so.superapp_order_status IN ('delivered', 'cancelled'))
-	      )
-	      AND (i.cursor_id = 0 OR so.id < i.cursor_id)
-	    ORDER BY so.id DESC
-	    LIMIT (SELECT lim FROM input)
-	),
-	page_products AS MATERIALIZED (
-	    SELECT DISTINCT sol.product_id
-	    FROM sale_order_line sol
-	    JOIN paged_ids pi ON pi.order_id = sol.order_id
-	    WHERE sol.product_id IS NOT NULL
-	),
-	product_attrs AS (
-	    SELECT
-	        pvc.product_product_id,
-	        string_agg(pav.name->>'en_US', ', ' ORDER BY pa.sequence) AS attributes
-	    FROM product_variant_combination pvc
-	    JOIN product_template_attribute_value ptav ON ptav.id = pvc.product_template_attribute_value_id
-	    JOIN product_attribute_value pav ON pav.id = ptav.product_attribute_value_id
-	    JOIN product_attribute pa ON pa.id = pav.attribute_id
-	    JOIN page_products pp ON pp.product_id = pvc.product_product_id
-	    GROUP BY pvc.product_product_id
-	)
-	SELECT
-	    g.partner_exists,
-	    g.merchant_ok,
-	    so.id              AS order_id,
-	    so.name            AS order_ref,
-	    so.state           AS order_state,
-	    so.superapp_order_status AS delivery_status,
-	    so.date_order      AS date_order,
-	    so.amount_total    AS total_price,
-	    so."deliveryType"  AS delivery_type,
-	    so.driver_name     AS driver_name,
-	    so.driver_mobile   AS driver_mobile,
-	    so.driver_email    AS driver_email,
-	    so.driver_delivery_medium AS delivery_medium,
+**Step 4b — merchant/company data fetched once per distinct company on the page**
+```
+SELECT
 	    rc.id              AS company_id,
 	    rc.merchant        AS merchant_code,
 	    rc.name            AS company_name,
@@ -113,7 +86,18 @@ WITH input AS (
 	    rp.city            AS city,
 	    rcs.name           AS state_name,
 	    rco.name->>'en_US' AS country_name,
-	    rcp.name           AS parent_name,
+	    rcp.name           AS parent_name
+	FROM res_company rc
+	LEFT JOIN res_partner rp ON rp.id = rc.partner_id
+	LEFT JOIN res_country_state rcs ON rcs.id = rp.state_id
+	LEFT JOIN res_country rco ON rco.id = rp.country_id
+	LEFT JOIN res_company rcp ON rcp.id = rc.parent_id
+	WHERE rc.id = ANY($1::int[])
+```
+**Step 5 — line items for the page**
+```
+SELECT
+	    sol.order_id       AS order_id,
 	    sol.id             AS line_id,
 	    sol.product_id     AS product_id,
 	    sol.name           AS line_name,
@@ -122,28 +106,29 @@ WITH input AS (
 	    sol.price_total    AS line_amount,
 	    COALESCE(pt.name->>'en_US', pt.name::text) AS product_template_name,
 	    u.name->>'en_US'   AS uom_name,
-	    NULLIF(TRIM(COALESCE(pp.image_1920_url, pt.image_1920_url, '')), '') AS product_image,
-	    pa.attributes      AS product_attributes
-	FROM guard g
-	LEFT JOIN paged_ids pi ON g.partner_exists AND g.merchant_ok
-	LEFT JOIN sale_order so ON so.id = pi.order_id
-	LEFT JOIN res_company rc ON rc.id = so.company_id
-	LEFT JOIN res_partner rp ON rp.id = rc.partner_id
-	LEFT JOIN res_country_state rcs ON rcs.id = rp.state_id
-	LEFT JOIN res_country rco ON rco.id = rp.country_id
-	LEFT JOIN res_company rcp ON rcp.id = rc.parent_id
-	LEFT JOIN sale_order_line sol ON sol.order_id = so.id
+	    NULLIF(TRIM(COALESCE(pp.image_1920_url, pt.image_1920_url, '')), '') AS product_image
+	FROM sale_order_line sol
 	LEFT JOIN product_product pp ON pp.id = sol.product_id
 	LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
 	LEFT JOIN uom_uom u ON u.id = sol.product_uom
-	LEFT JOIN product_attrs pa ON pa.product_product_id = pp.id
-	ORDER BY so.id DESC NULLS LAST, sol.id ASC
+	WHERE sol.order_id = ANY($1::int[])
+	ORDER BY sol.order_id DESC, sol.id ASC
 ```
-
-
-
-
-
+**Step 6 — variant attributes: filter products first (uses product_variant_combination_product_id_idx)**
+```
+SELECT
+	    pvc.product_product_id AS product_id,
+	    string_agg(pav.name->>'en_US', ', ' ORDER BY pa.sequence) AS product_attributes
+	FROM product_variant_combination pvc
+	INNER JOIN product_template_attribute_value ptav
+	    ON ptav.id = pvc.product_template_attribute_value_id
+	INNER JOIN product_attribute_value pav
+	    ON pav.id = ptav.product_attribute_value_id
+	INNER JOIN product_attribute pa
+	    ON pa.id = pav.attribute_id
+	WHERE pvc.product_product_id = ANY($1::int[])
+	GROUP BY pvc.product_product_id
+```
 
 ## Endpoint 2 — GET /api/v1/{merchant}/orders/{order_id}/status
 
