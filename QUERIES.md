@@ -2012,7 +2012,7 @@ Iterate through each merchant. The existence of m.CompanyID in loyaltyMap dictat
     }
 
 ```sql
-SELECT
+SELECT DISTINCT ON (p.company_id)
     p.company_id,
     p.id AS program_id,
     p.name ->> 'en_US' AS program_name,
