@@ -1949,151 +1949,69 @@ ORDER BY
 ```
 
 ## Endpoint 20 — GET /api/v1/merchants/list_all
+Parameters:
+    $1: is_featured (true, false, or NULL)
+    $2: cursor_id (the last company_id from the previous page, or NULL for page 1)
+    $3: limit (e.g., 10 or 100)
+    $4: is_discount (1)
+
 ```sql
--- EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
-WITH params AS (
-    SELECT
-        NULL::int AS cursor_id,
-        10::int AS per_page,
-        NULL::int AS fetch_limit,
-        NULL::text AS is_featured_param,
-        NULL::text AS is_discount_param,
-        NULL::text AS is_delivery_param
-),
-p AS (
-    SELECT
-        cursor_id,
-        LEAST(GREATEST(per_page, 1), 100) AS per_page,
-        LEAST(GREATEST(COALESCE(fetch_limit, per_page + 1), 1), 1000) AS fetch_limit,
-        CASE
-            WHEN lower(trim(coalesce(is_featured_param, ''))) IN ('true', 'yes', '1') THEN TRUE
-            ELSE FALSE
-        END AS featured_filter,
-        CASE
-            WHEN lower(trim(coalesce(is_discount_param, ''))) IN ('true', 'yes', '1') THEN TRUE
-            WHEN lower(trim(coalesce(is_discount_param, ''))) IN ('false', 'no', '0') THEN FALSE
-            ELSE NULL
-        END AS discount_filter,
-        CASE
-            WHEN lower(trim(coalesce(is_delivery_param, ''))) IN ('true', 'yes', '1') THEN TRUE
-            WHEN lower(trim(coalesce(is_delivery_param, ''))) IN ('false', 'no', '0') THEN FALSE
-            ELSE FALSE
-        END AS delivery_filter
-    FROM params
-),
-active_loyalty_companies AS (
-    SELECT DISTINCT lp.company_id
-    FROM loyalty_program lp
-    CROSS JOIN p
-    WHERE p.discount_filter IS NOT NULL
-      AND lp.is_ecommerce = TRUE
-      AND lp.x_superapp_approval_status = 'approved'
-      AND (lp.date_from IS NULL OR lp.date_from <= CURRENT_DATE)
-      AND (lp.date_to IS NULL OR lp.date_to >= CURRENT_DATE)
-),
-paginated_merchant_ids AS (
-    SELECT c.id
-    FROM res_company c
-    CROSS JOIN p
-    LEFT JOIN active_loyalty_companies alc ON alc.company_id = c.id
-    WHERE c.parent_id IS NULL
-      AND c.merchant IS NOT NULL
-      AND c.merchant <> ''
-      AND c.cps_enabled = TRUE
-      AND c.active = TRUE
-      AND c.is_delivery = p.delivery_filter
-      AND (NOT p.featured_filter OR c.is_featured = TRUE)
-      AND (p.discount_filter IS NULL OR (alc.company_id IS NOT NULL) = p.discount_filter)
-      AND (p.cursor_id IS NULL OR c.id < p.cursor_id)
-    ORDER BY c.id DESC
-    LIMIT (SELECT fetch_limit FROM p)
-),
-paginated_merchants AS (
-    SELECT
-        c.id,
-        c.name,
-        c.merchant,
-        c.logo_url,
-        c.banner_url,
-        c.product_count,
-        c.open_hour,
-        c.open_moment,
-        c.close_hour,
-        c.close_moment,
-        c.cps_account_number,
-        c.business_type_id
-    FROM paginated_merchant_ids pm
-    JOIN res_company c ON c.id = pm.id
-),
-page_loyalty_programs AS (
-    SELECT
-        lp.company_id,
-        lp.id AS program_id,
-        lp.name AS program_name,
-        lp.sequence,
-        ROW_NUMBER() OVER (
-            PARTITION BY lp.company_id
-            ORDER BY lp.sequence, lp.id
-        ) AS loyalty_row_num
-    FROM loyalty_program lp
-    JOIN paginated_merchant_ids pm ON pm.id = lp.company_id
-    WHERE lp.is_ecommerce = TRUE
-      AND lp.x_superapp_approval_status = 'approved'
-      AND (lp.date_from IS NULL OR lp.date_from <= CURRENT_DATE)
-      AND (lp.date_to IS NULL OR lp.date_to >= CURRENT_DATE)
-),
-page_loyalty AS (
-    SELECT
-        plp.company_id,
-        TRUE AS is_discount,
-        json_build_array(
-            json_build_object(
-                'id', plp.program_id,
-                'name', plp.program_name ->> 'en_US',
-                'rewards', COALESCE(
-                    json_agg(
-                        json_build_object(
-                            'discount', lr.discount,
-                            'discount_mode', lr.discount_mode
-                        ) ORDER BY lr.id
-                    ) FILTER (WHERE lr.id IS NOT NULL),
-                    '[]'::json
-                )
-            )
-        ) AS discount
-    FROM page_loyalty_programs plp
-    LEFT JOIN loyalty_reward lr ON lr.program_id = plp.program_id
-    WHERE plp.loyalty_row_num = 1
-    GROUP BY plp.company_id, plp.program_id, plp.program_name
-)
 SELECT
-    pm.merchant AS merchant_id,
-    pm.name,
-    NULLIF(pm.logo_url, '') AS logo,
-    NULLIF(pm.banner_url, '') AS banner,
-    bt.code AS business_type,
-    COALESCE(pm.product_count, 0) AS total_products,
-    CASE
-        WHEN pm.open_hour IS NOT NULL AND pm.open_moment IS NOT NULL THEN
-            LPAD(FLOOR(pm.open_hour)::int::text, 2, '0') || ':' ||
-            LPAD(LEAST(FLOOR((pm.open_hour - FLOOR(pm.open_hour)) * 60)::numeric, 59)::int::text, 2, '0') ||
-            ' ' || UPPER(pm.open_moment)
-        ELSE NULL
-    END AS opening_time,
-    CASE
-        WHEN pm.close_hour IS NOT NULL AND pm.close_moment IS NOT NULL THEN
-            LPAD(FLOOR(pm.close_hour)::int::text, 2, '0') || ':' ||
-            LPAD(LEAST(FLOOR((pm.close_hour - FLOOR(pm.close_hour)) * 60)::numeric, 59)::int::text, 2, '0') ||
-            ' ' || UPPER(pm.close_moment)
-        ELSE NULL
-    END AS closing_time,
-    NULLIF(pm.cps_account_number, '') AS cps_account_number,
-    COALESCE(pl.is_discount, FALSE) AS is_discount,
-    COALESCE(pl.discount, '[]'::json) AS discount
-FROM paginated_merchants pm
-LEFT JOIN company_business_type bt ON bt.id = pm.business_type_id
-LEFT JOIN page_loyalty pl ON pl.company_id = pm.id
-ORDER BY pm.id DESC;
+    c.id AS company_id,
+    c.name,
+    c.merchant AS merchant_id,
+    c.logo_url AS logo,
+    c.banner_url AS banner,
+    c.business_type,
+    COALESCE(c.product_count, 0) AS total_products,
+    c.opening_time,
+    c.closing_time,
+    NULLIF(c.cps_account_number, '') AS cps_account_number
+FROM res_company c
+WHERE c.parent_id IS NULL
+  AND c.merchant IS NOT NULL
+  AND c.merchant <> ''
+  AND c.is_delivery = FALSE
+  AND c.cps_enabled = TRUE
+  AND c.active = TRUE
+  AND ($1::boolean IS NOT TRUE OR c.is_featured = TRUE)
+  AND ($2::int IS NULL OR c.id < $2)
+ORDER BY c.id DESC
+LIMIT $3;
+```
+
+
+Query 2: Batch Hydrate Loyalty Programs 
+if is_discount param is passes
+    for Outer Field ('is_discount' (bool), 'discount' List [])
+Parameters:
+    $1: Array of company IDs gathered from Query 1 (e.g., ARRAY[22, 26, 30] in raw SQL or pq.Array(companyIDs) in Go).
+
+Iterate through each merchant. The existence of m.CompanyID in loyaltyMap dictates whether is_discount is true or false:
+    // 2. State Assignment: If the merchant has a program, attach the flag and array
+    if hasDiscount {
+        m.IsDiscount = &trueVal
+        m.Discount = []LoyaltyDiscount{program}
+    }
+
+```sql
+SELECT
+    p.company_id,
+    p.id AS program_id,
+    p.name ->> 'en_US' AS program_name,
+    p.sequence,
+    p.primary_reward_type AS reward_type,
+    p.primary_reward_discount AS discount,
+    p.primary_reward_discount_mode AS discount_mode,
+    p.primary_reward_discount_applicability AS discount_applicability,
+    p.primary_reward_description AS description
+FROM loyalty_program p
+WHERE p.company_id = ANY($1::int[]) -- company ids Array from first request
+  AND p.is_ecommerce = TRUE
+  AND p.x_superapp_approval_status = 'approved'
+  AND (p.date_from IS NULL OR p.date_from <= CURRENT_DATE)
+  AND (p.date_to IS NULL OR p.date_to >= CURRENT_DATE)
+ORDER BY p.company_id, p.sequence, p.id;
 ```
 
 ## Endpoint 21 — GET /api/v1/merchant/{merchant}
