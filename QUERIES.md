@@ -292,27 +292,25 @@ SELECT
 
 ## Endpoint 4 — GET /api/v1/product/purchase_status
 
-
-Query: app_user_id, product_id
-$1 = app_user_id
-$2 = product_id   (product_product.id — variant id)
-
-```sql
-WITH partner AS (
-    SELECT id FROM res_partner WHERE app_user_id = $1 LIMIT 1
-)
-SELECT EXISTS(SELECT 1 FROM partner) AS partner_exists,
-       EXISTS(
-           SELECT 1 FROM sale_order_line sol
-           JOIN sale_order so ON so.id = sol.order_id
-           WHERE so.partner_id = (SELECT id FROM partner)
-             AND so.is_superapp_order = TRUE
-             AND so.state IN ('sale', 'done')
-             AND sol.product_id = $2
-       ) AS is_bought;
+**Step 1 — resolve customer partner**
 ```
-
-
+SELECT id
+	FROM res_partner
+	WHERE app_user_id = $1
+	LIMIT 1
+```
+**Step 2 — check if product was bought in a confirmed superapp order**
+```
+SELECT EXISTS(
+	    SELECT 1
+	    FROM sale_order_line sol
+	    JOIN sale_order so ON so.id = sol.order_id
+	    WHERE so.partner_id = $1
+	      AND so.is_superapp_order = TRUE
+	      AND so.state IN ('sale', 'done')
+	      AND sol.product_id = $2
+	)
+```
 
 ## Endpoint 5 — GET /api/v1/orders/list
 
