@@ -132,75 +132,109 @@ SELECT
 
 ## Endpoint 2 — GET /api/v1/{merchant}/orders/{order_id}/status
 
-
-
-Path: merchant, order_id
-$1 = order_id
-$2 = merchant
-
-
-```sql
-WITH base AS (
-    SELECT
-        so.id AS order_id, so.name AS order_name, so.state,
-        so.superapp_order_status AS order_status,
-        ROUND((so.amount_total + COALESCE(dp.ecommerce_float_price, 0))::numeric, 2) AS amount_total,
-        so.invoice_status, so.lock_id, so.ft_reference,
-        so.delivery_lat, so.delivery_long, so.customer_pickup_code,
-        so.driver_name, so.driver_mobile, so.driver_delivery_medium,
-        so."deliveryType" AS delivery_type, so.date_order,
-        dp.ecommerce_float_price AS delivery_price,
-        rc.id AS company_id, rc.name AS company_name, rc.merchant AS company_merchant,
-        NULLIF(TRIM(COALESCE(rc.logo_url, rp.image_1920_url, '')), '') AS logo_url,
-        rc.lat_location AS lat, rc.lng_location AS lng, rc.phone AS company_phone,
-        rp.street, rp.city, rs.name AS state_name, rco.name->>'en_US' AS country_name
-    FROM sale_order so
-    INNER JOIN res_company rc ON rc.id = so.company_id AND rc.merchant = $2
-        AND rc.is_delivery = FALSE AND rc.merchant IS NOT NULL
-    LEFT JOIN res_partner rp ON rp.id = rc.partner_id
-    LEFT JOIN res_country_state rs ON rs.id = rp.state_id
-    LEFT JOIN res_country rco ON rco.id = rp.country_id
-    LEFT JOIN product_product dp ON dp.id = so.delivery_product_id::integer
-        AND so.delivery_product_id IS NOT NULL AND so.delivery_product_id != '0'
-    WHERE so.id = $1 AND so.is_superapp_order = TRUE
-    LIMIT 1
-)
-SELECT b.*, COALESCE(pickings.delivery_count, 0) AS delivery_count,
-       COALESCE(lines.lines_json, '[]'::json) AS lines_json
-FROM base b
-LEFT JOIN LATERAL (
-    SELECT COUNT(*)::int AS delivery_count FROM stock_picking sp WHERE sp.sale_id = b.order_id
-) pickings ON true
-LEFT JOIN LATERAL (
-    SELECT json_agg(json_build_object(
-        'id', sol.id, 'product_id', sol.product_id,
-        'name', COALESCE(sol.name, CASE WHEN attrs.attributes IS NOT NULL
-            THEN CONCAT(pt.name->>'en_US', ' (', attrs.attributes, ')') ELSE pt.name->>'en_US' END),
-        'qty', sol.product_uom_qty, 'uom', u.name->>'en_US',
-        'price_unit', ROUND(sol.price_unit::numeric, 2),
-        'line_amount', ROUND(sol.price_total::numeric, 2),
-        'product_image', NULLIF(TRIM(COALESCE(pp.image_1920_url, pt.image_1920_url, '')), '')
-    )) AS lines_json
-    FROM sale_order_line sol
-    LEFT JOIN product_product pp ON pp.id = sol.product_id
-    LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
-    LEFT JOIN uom_uom u ON u.id = sol.product_uom
-    LEFT JOIN (
-        SELECT pvc.product_product_id, string_agg(pav.name->>'en_US', ', ' ORDER BY pa.sequence) AS attributes
-        FROM product_variant_combination pvc
-        JOIN product_template_attribute_value ptav ON ptav.id = pvc.product_template_attribute_value_id
-        JOIN product_attribute_value pav ON pav.id = ptav.product_attribute_value_id
-        JOIN product_attribute pa ON pa.id = pav.attribute_id
-        WHERE pvc.product_product_id IN (
-            SELECT DISTINCT product_id FROM sale_order_line WHERE order_id = b.order_id
-        )
-        GROUP BY pvc.product_product_id
-    ) attrs ON attrs.product_product_id = pp.id
-    WHERE sol.order_id = b.order_id
-) lines ON true;
+**Step 1 — resolve merchant company**
+```
+SELECT id
+	FROM res_company
+	WHERE merchant = $1
+	  AND is_delivery = FALSE
+	  AND merchant IS NOT NULL
+	LIMIT 1
+```
+**Step 2 — order header for one id scoped to merchant company**
+```
+SELECT
+	    so.id                     AS order_id,
+	    so.name                   AS order_name,
+	    so.superapp_order_status  AS order_status,
+	    ROUND((so.amount_total + COALESCE(dp.ecommerce_float_price, 0))::numeric, 2) AS amount_total,
+	    so.invoice_status         AS invoice_status,
+	    so.lock_id                AS lock_id,
+	    so.ft_reference           AS ft_reference,
+	    so.delivery_lat           AS delivery_lat,
+	    so.delivery_long          AS delivery_long,
+	    so.customer_pickup_code   AS pickup_code,
+	    so.driver_name            AS driver_name,
+	    so.driver_mobile          AS driver_mobile,
+	    so.driver_delivery_medium AS driver_medium,
+	    so."deliveryType"         AS delivery_type,
+	    so.date_order             AS date_order,
+	    dp.ecommerce_float_price  AS delivery_price,
+	    so.company_id             AS company_id
+	FROM sale_order so
+	LEFT JOIN product_product dp
+	       ON dp.id = so.delivery_product_id::integer
+	      AND so.delivery_product_id IS NOT NULL
+	      AND so.delivery_product_id != '0'
+	WHERE so.id = $1
+	  AND so.company_id = $2
+	  AND so.is_superapp_order = TRUE
+	LIMIT 1
+```
+**Step 3 — delivery count for one order**
+```
+SELECT COUNT(*)::int AS delivery_count
+	FROM stock_picking
+	WHERE sale_id = $1
+```
+**Step 4 — merchant/company data**
+```
+SELECT
+	    rc.id              AS company_id,
+	    rc.merchant        AS merchant_code,
+	    rc.name            AS company_name,
+	    NULLIF(TRIM(COALESCE(rc.logo_url, rp.image_1920_url, '')), '') AS logo_url,
+	    rc.lat_location    AS lat,
+	    rc.lng_location    AS lng,
+	    rc.phone           AS company_phone,
+	    rp.street          AS street,
+	    rp.city            AS city,
+	    rcs.name           AS state_name,
+	    rco.name->>'en_US' AS country_name,
+	    rcp.name           AS parent_name
+	FROM res_company rc
+	LEFT JOIN res_partner rp ON rp.id = rc.partner_id
+	LEFT JOIN res_country_state rcs ON rcs.id = rp.state_id
+	LEFT JOIN res_country rco ON rco.id = rp.country_id
+	LEFT JOIN res_company rcp ON rcp.id = rc.parent_id
+	WHERE rc.id = ANY($1::int[])
+```
+**Step 5 — line items for the order**
+```
+SELECT
+	    sol.order_id          AS order_id,
+	    sol.id                AS line_id,
+	    sol.product_id        AS product_id,
+	    sol.name              AS line_name,
+	    sol.product_uom_qty   AS qty,
+	    sol.price_unit        AS price_unit,
+	    sol.price_total       AS line_amount,
+	    COALESCE(pt.name->>'en_US', pt.name::text) AS product_template_name,
+	    u.name->>'en_US'      AS uom_name,
+	    NULLIF(TRIM(COALESCE(pp.image_1920_url, pt.image_1920_url, '')), '') AS product_image
+	FROM sale_order_line sol
+	LEFT JOIN product_product pp ON pp.id = sol.product_id
+	LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
+	LEFT JOIN uom_uom u ON u.id = sol.product_uom
+	WHERE sol.order_id = ANY($1::int[])
+	ORDER BY sol.order_id DESC, sol.id ASC
 ```
 
-
+**Step 6 — variant attributes for line products**
+```
+SELECT
+	    pvc.product_product_id AS product_id,
+	    string_agg(pav.name->>'en_US', ', ' ORDER BY pa.sequence) AS product_attributes
+	FROM product_variant_combination pvc
+	INNER JOIN product_template_attribute_value ptav
+	    ON ptav.id = pvc.product_template_attribute_value_id
+	INNER JOIN product_attribute_value pav
+	    ON pav.id = ptav.product_attribute_value_id
+	INNER JOIN product_attribute pa
+	    ON pa.id = pav.attribute_id
+	WHERE pvc.product_product_id = ANY($1::int[])
+	GROUP BY pvc.product_product_id
+```
 
 
 
