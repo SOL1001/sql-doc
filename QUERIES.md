@@ -410,6 +410,20 @@ LIMIT %lim; --10;
 ## Endpoint 10 — GET /api/v1/popular_products
 
 ### Parameter Breakdown
+#### ** Parameter on API 
+| HTTP Query Parameter | Target Go Variable | Parsing Logic / Transformation | Default Value | Notes / Validation Rules |
+| --- | --- | --- | --- | --- |
+| `merchant` | `merchantParam` (`*string`) | `strings.TrimSpace(q.Get("merchant"))` | `nil` | When absent, triggers global resolution (Mode B) |
+| `cursor_id` | `cursorID` (`*int64`) | `strconv.ParseInt(c, 10, 64)` | `nil` | Keyset anchor: Product ID from the previous page |
+| `cursor_sold_count` | `cursorSold` (`*int`) | `strconv.Atoi(cs)` | `nil` | Keyset anchor: Units sold from the previous page |
+| `per_page` | `perPage` (`int`) | `strconv.Atoi(p)` | `10` | Clamped to the range `[1, 100]` |
+| `min_price` | `minPrice` (`float64`) | `strconv.ParseFloat(mp, 64)` | `0.0` | Bound filter: `ecommerce_float_price >= minPrice` |
+| `max_price` | `maxPrice` (`float64`) | `strconv.ParseFloat(mp, 64)` | `10000000.0` | Bound filter: `ecommerce_float_price <= maxPrice` |
+| `category_id` | `categoryID` (`int`) | `strconv.Atoi(cat)` | `0` | Filter by ecommerce category ID (`0` disables filter) |
+| `is_halal` | `halalFilter` (`*bool`) | `parseTriState(...)` | `nil` | Maps `"true"`, `"1"`, `"yes"` $\rightarrow$ `true`; `"false"`, `"0"`, `"no"` $\rightarrow$ `false` |
+| `sort_mode` | `sortMode` (`string`) | `strings.ToLower(strings.TrimSpace(...))` | `"sold_desc"` | Matches `"sold_asc"` or `"asc"`; defaults to `"sold_desc"` |
+
+#### **Query Parameter Breakdown
 | Query Step | Parameter Placeholder | Go Source Expression | PostgreSQL Data Type | Description |
 | --- | --- | --- | --- | --- |
 | **Step 1A** | `$1` | `*merchantParam` | `text` | Target merchant identifier. |
