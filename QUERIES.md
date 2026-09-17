@@ -240,89 +240,49 @@ SELECT
 
 ## Endpoint 3 — GET /api/v1/product/{product_id}/reviews
 
-
-
-Path: product_id   (product_template.id — not variant id)
-Query: cursor, per_page (default 20)
-
-Bind params:
-  $1 = product_id
-  $2 = fetch_limit       (per_page + 1)
-  $3 = cursor_id         (0 on first page; else last review id)
-
-
-**Cursor rule:** `pr.id < cursor_id`, sort `pr.id DESC`.
-
-```sql
-WITH input AS (
-    SELECT
-        $1::int AS product_id,
-        $2::int AS lim,
-        $3::int AS cursor_id
-),
-product_check AS (
-    SELECT EXISTS(
-        SELECT 1 FROM product_template pt
-        JOIN input i ON pt.id = i.product_id
-    ) AS exists
-),
-base AS (
-    SELECT
-        pr.id,
-        COALESCE(rp.name, 'Anonymous') AS user_name,
-        rp.app_user_id,
-        pr.rating,
-        COALESCE(pr.review, '') AS review,
-        TO_CHAR(pr.create_date, 'DD TMMonth YYYY') AS create_date
-    FROM input i
-    JOIN product_review pr ON pr.product_template = i.product_id
-    LEFT JOIN res_partner rp ON rp.id = pr.user_id
-    WHERE i.cursor_id = 0 OR pr.id < i.cursor_id
-    ORDER BY pr.id DESC
-    LIMIT (SELECT lim FROM input)
-),
-aggregated_reviews AS (
-    SELECT COALESCE(
-        json_agg(
-            json_build_object(
-                'id', b.id,
-                'user_name', b.user_name,
-                'user_id', CASE
-                    WHEN b.app_user_id IS NOT NULL AND b.app_user_id != ''
-                    THEN to_jsonb(b.app_user_id)
-                    ELSE to_jsonb(false)
-                END,
-                'rating', COALESCE(NULLIF(b.rating, ''), '0')::int,
-                'review', b.review,
-                'create_date', b.create_date,
-                'replys', COALESCE(replies.replies_json, '[]'::json)
-            )
-            ORDER BY b.id DESC
-        ),
-        '[]'::json
-    ) AS reviews_json
-    FROM base b
-    LEFT JOIN LATERAL (
-        SELECT json_agg(
-            json_build_object(
-                'reply_from', COALESCE(rp2.name, 'Dev Team'),
-                'reply', COALESCE(rr.reply, ''),
-                'reply_date', TO_CHAR(rr.create_date, 'DD TMMonth YYYY')
-            ) ORDER BY rr.id ASC
-        ) AS replies_json
-        FROM review_reply rr
-        LEFT JOIN res_partner rp2 ON rp2.id = rr.user_id
-        WHERE rr.review_id = b.id
-    ) replies ON true
-)
-SELECT
-    (SELECT exists FROM product_check),
-    (SELECT reviews_json FROM aggregated_reviews);
+**Step 1 — product exists (product_template.id)**
 ```
-
-
-
-
+SELECT EXISTS(
+	    SELECT 1
+	    FROM product_template
+	    WHERE id = $1
+	)
+```
+**Step 2 — page review ids (cursor on review id DESC)**
+```
+SELECT id
+	FROM product_review
+	WHERE product_template = $1
+	  AND ($3 = 0 OR id < $3)
+	ORDER BY id DESC
+	LIMIT $2
+```
+**Step 3 — review rows for the page**
+```
+SELECT
+	    pr.id              AS review_id,
+	    COALESCE(rp.name, 'Anonymous') AS user_name,
+	    rp.app_user_id     AS app_user_id,
+	    pr.rating          AS rating,
+	    COALESCE(pr.review, '') AS review,
+	    pr.create_date     AS create_date
+	FROM product_review pr
+	LEFT JOIN res_partner rp ON rp.id = pr.user_id
+	WHERE pr.id = ANY($1::int[])
+	ORDER BY pr.id DESC
+```
+**Step 4 — replies for the page reviews (single batch)**
+```
+SELECT
+	    rr.review_id       AS review_id,
+	    COALESCE(rp.name, 'Dev Team') AS reply_from,
+	    COALESCE(rr.reply, '') AS reply,
+	    rr.create_date     AS reply_date
+	FROM review_reply rr
+	LEFT JOIN res_partner rp ON rp.id = rr.user_id
+	WHERE rr.review_id = ANY($1::int[])
+	ORDER BY rr.review_id ASC, rr.id ASC
+```
 
 ## Endpoint 4 — GET /api/v1/product/purchase_status
 
@@ -348,97 +308,43 @@ SELECT EXISTS(
 
 ## Endpoint 5 — GET /api/v1/orders/list
 
-
-
-Query: app_user_id, lim, cursor_id
-
-
-
-```sql
-WITH input AS (
-	    SELECT
-	        $1::text AS app_user_id,
-	        $2::int  AS lim,
-	        $3::int  AS cursor_id
-	),
-	partner AS (
-	    SELECT p.id
-	    FROM res_partner p
-	    JOIN input i ON TRUE
-	    WHERE p.app_user_id = i.app_user_id
-	      AND p.active = TRUE
-	    LIMIT 1
-	),
-	base_companies AS (
-	    SELECT
-	        rc.id                            AS company_id,
-	        rc.name                          AS company_name,
-	        rc.merchant                      AS merchant,
-	        NULLIF(TRIM(COALESCE(rc.logo_url, rp.image_1920_url, '')), '') AS logo_url,
-	        COUNT(so.id)::int                AS order_count
-	    FROM partner p
-	    JOIN sale_order so ON so.partner_id = p.id
-	                      AND so.is_superapp_order = TRUE
-	    JOIN res_company rc ON rc.id = so.company_id
-	    LEFT JOIN res_partner rp ON rp.id = rc.partner_id
-	    GROUP BY rc.id, rc.name, rc.merchant, rc.logo_url, rp.image_1920_url
-	),
-	cursor_row AS (
-	    SELECT b.order_count, b.company_name, b.company_id
-	    FROM base_companies b
-	    JOIN input i ON TRUE
-	    WHERE i.cursor_id <> 0
-	      AND b.company_id = i.cursor_id
-	    LIMIT 1
-	),
-	paginated_companies AS (
-	    SELECT b.*
-	    FROM base_companies b
-	    JOIN input i ON TRUE
-	    WHERE i.cursor_id = 0
-	       OR EXISTS (
-	            SELECT 1
-	            FROM cursor_row c
-	            WHERE b.order_count < c.order_count
-	               OR (b.order_count = c.order_count AND b.company_name > c.company_name)
-	               OR (b.order_count = c.order_count
-	                   AND b.company_name = c.company_name
-	                   AND b.company_id > c.company_id)
-	       )
-	    ORDER BY b.order_count DESC, b.company_name ASC, b.company_id ASC
-	    LIMIT (SELECT lim FROM input)
-	),
-	aggregated_results AS (
-	    SELECT COALESCE(
-	        json_agg(
-	            json_build_object(
-	                'company_id', pc.company_id,
-	                'company_name', pc.company_name,
-	                'merchant', pc.merchant,
-	                'logo_url', pc.logo_url,
-	                'order_count', pc.order_count,
-	                'item_count', COALESCE(items.item_count, 0)
-	            ) ORDER BY pc.order_count DESC, pc.company_name ASC, pc.company_id ASC
-	        ),
-	        '[]'::json
-	    ) AS results_json
-	    FROM paginated_companies pc
-	    LEFT JOIN LATERAL (
-	        SELECT COUNT(sol.id)::int AS item_count
-	        FROM sale_order_line sol
-	        JOIN sale_order so2 ON so2.id = sol.order_id
-	        WHERE so2.partner_id = (SELECT id FROM partner)
-	          AND so2.is_superapp_order = TRUE
-	          AND so2.superapp_order_status != 'cancelled'
-	          AND so2.company_id = pc.company_id
-	    ) items ON true
-	)
-	SELECT
-	    EXISTS(SELECT 1 FROM partner) AS partner_exists,
-	    (SELECT results_json FROM aggregated_results)
+**Step 1 — resolve customer partner**
 ```
-
-
+SELECT id
+	FROM res_partner
+	WHERE app_user_id = $1
+	  AND active = TRUE
+	LIMIT 1
+```
+**Step 2 — order counts grouped by merchant company for one partner**
+```
+SELECT
+	    rc.id              AS company_id,
+	    rc.name            AS company_name,
+	    rc.merchant        AS merchant,
+	    NULLIF(TRIM(COALESCE(rc.logo_url, rp.image_1920_url, '')), '') AS logo_url,
+	    COUNT(so.id)::int AS order_count
+	FROM sale_order so
+	JOIN res_company rc ON rc.id = so.company_id
+	LEFT JOIN res_partner rp ON rp.id = rc.partner_id
+	WHERE so.partner_id = $1
+	  AND so.is_superapp_order = TRUE
+	GROUP BY rc.id, rc.name, rc.merchant, rc.logo_url, rp.image_1920_url
+	ORDER BY order_count DESC, company_name ASC, company_id ASC
+```
+**Step 3 — line item counts for page companies (non-cancelled orders only)**
+```
+SELECT
+	    so.company_id      AS company_id,
+	    COUNT(sol.id)::int AS item_count
+	FROM sale_order_line sol
+	JOIN sale_order so ON so.id = sol.order_id
+	WHERE so.partner_id = $1
+	  AND so.is_superapp_order = TRUE
+	  AND so.superapp_order_status != 'cancelled'
+	  AND so.company_id = ANY($2::int[])
+	GROUP BY so.company_id
+```
 
 
 ## Endpoint 6 — GET /api/v1/categoryads
