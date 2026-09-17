@@ -1605,17 +1605,16 @@ ORDER BY pd.product_tmpl_id, pd.id ASC;
 ```sql
 SELECT DISTINCT ON (lp.company_id)
     lp.company_id,
-    lr.discount_mode,
-    lr.discount
-FROM loyalty_program lp
-JOIN loyalty_reward lr ON lr.program_id = lp.id
+    lp.primary_reward_discount_mode,
+    lp.primary_reward_discount
+FROM loyalty_program lp 
 WHERE lp.company_id = ANY($1::bigint[])
-  AND lp.program_type = 'promotion'
-  AND lp.is_ecommerce = TRUE
-  AND lp.x_superapp_approval_status = 'approved'
-  AND (lp.date_from IS NULL OR lp.date_from <= CURRENT_DATE)
-  AND (lp.date_to IS NULL OR lp.date_to >= CURRENT_DATE)
-ORDER BY lp.company_id, lp.sequence, lp.id, lr.id ASC;
+    AND lp.program_type = 'promotion'
+    AND lp.is_ecommerce = TRUE
+    AND lp.x_superapp_approval_status = 'approved'
+    AND (lp.date_from IS NULL OR lp.date_from <= CURRENT_DATE)
+    AND (lp.date_to IS NULL OR lp.date_to >= CURRENT_DATE)
+ORDER BY lp.company_id, lp.sequence, lp.id ASC;
 ```
 
 ## Endpoint 20 — GET /api/v1/merchants/list_all
