@@ -1349,8 +1349,43 @@ LIMIT %lim;
 ```
 
 ## Endpoint 19 — GET /api/v1/total_products
-### 19 A, Resolve Companies
-**If merchant parameter is passed (`merchantParam != nil`):**
+### 2. Query Parameter Breakdown
+| Step | Parameter | Source Expression | DB Type | Description |
+| --- | --- | --- | --- | --- |
+| **Step 1A** | `$1` | `*merchantParam` | `text` | Target merchant code (e.g. `MRT000001SPR`). |
+| **Step 1B** | *(None)* | *(None)* | *(None)* | Unparameterized self-join query. |
+| **Step 2** | `$1` | `pq.Array(companyIDs)` | `bigint[]` | Array of company IDs resolved in Step 1. |
+| **Step 2** | Dynamic | `categoryID` | `integer` | Filters by `pt.ecomerce_category_id`. |
+| **Step 2** | Dynamic | `minPrice` | `double precision` | Minimum list price (`>=`). |
+| **Step 2** | Dynamic | `maxPrice` | `double precision` | Maximum list price (`<=`). |
+| **Step 2** | Dynamic | `*featuredFilter` | `boolean` | Match on `pt.t_is_featured`. |
+| **Step 2** | Dynamic | `*halalFilter` | `boolean` | Match on `pt.is_halal`. |
+| **Step 2** | Dynamic | `*arrivalFilter` | `boolean` | Match on `pt.is_arrival`. |
+| **Step 2** | Dynamic (Cursor) | `*cursorPrice`, `*cursorID` | `double precision`, `bigint` | Keyset pagination anchor values. |
+| **Step 2** | Dynamic (Limit) | `fetchLimit` (`perPage + 1`) | `integer` | Number of items to fetch to determine `has_more`. |
+| **Step 3A** | `$1` | `pq.Array(productIDs)` | `bigint[]` | Array of IDs of products present on the page. |
+| **Step 3B** | `$1` | `pq.Array(distinctCompanyIDs)` | `bigint[]` | Array of company IDs present on the page. |
+
+
+#### Query Parameters
+| Parameter | Type | Required | Default | Values / Behavior |
+| --- | --- | --- | --- | --- |
+| `merchant` | string | No | `null` | Merchant code identifier. |
+| `per_page` | integer | No | `10` | Number of items per page (clamped between `1` and `100`). |
+| `cursor_id` | integer | No | `null` | Pagination cursor: ID of the last item on the previous page. |
+| `cursor_price` | float | No | `null` | Pagination cursor: list price of the last item (used for price sorts). |
+| `sort_mode` | string | No | `id_desc` | Sort type: `id_desc`, `price_desc`, `price_asc`. |
+| `high_to_low` | string | No | `null` | Legacy price sort override: `true`/`1` sets `price_desc`; `false`/`0` sets `price_asc`. |
+| `category_id` | integer | No | `0` | Filter by `ecomerce_category_id` (`0` disables filter). |
+| `min_price` | float | No | `0.0` | Minimum `ecommerce_float_price`. |
+| `max_price` | float | No | `10000000.0` | Maximum `ecommerce_float_price`. |
+| `is_featured` | string | No | `null` | Tri-state boolean (`true`/`false`). |
+| `is_halal` | string | No | `null` | Tri-state boolean (`true`/`false`). |
+| `is_arrival` | string | No | `null` | Tri-state boolean (`true`/`false`). |
+| `is_discount` | string | No | `false` | When `true`/`1`, returns only products that have an active discount. |
+
+#### **Step 1A: Targeted Merchant Lookup (When `merchant` is provided)**
+Executed when the `merchant` query parameter is present:
 ```sql
 SELECT 
     c.id, 
@@ -1365,8 +1400,8 @@ WHERE c.merchant = $1
 LIMIT 1;
 ```
 
-**If merchant parameter is nil (`merchantParam == nil`):**
-
+#### **Step 1B: Global Merchant Resolution (When `merchant` is omitted / nil)**
+Executed when no `merchant` parameter is supplied, retrieving all root companies and valid children of root companies:
 ```sql
 SELECT 
     c.id, 
@@ -1378,7 +1413,7 @@ LEFT JOIN res_company p ON p.id = c.parent_id
 WHERE c.cps_enabled = TRUE
   AND COALESCE(c.is_delivery, FALSE) = FALSE
   AND c.active = TRUE
-  AND NULLIF(TRIM(c.merchant::text), '') IS NOT NULL
+  AND NULLIF(TRIM(c.merchant), '') IS NOT NULL
   AND (
       c.parent_id IS NULL 
       OR (
@@ -1386,12 +1421,13 @@ WHERE c.cps_enabled = TRUE
           AND p.cps_enabled = TRUE 
           AND COALESCE(p.is_delivery, FALSE) = FALSE 
           AND p.active = TRUE 
-          AND NULLIF(TRIM(p.merchant::text), '') IS NOT NULL
+          AND NULLIF(TRIM(p.merchant), '') IS NOT NULL
       )
   );
 ```
 
-### 19 B, Fetch Paginated Products
+#### **Step 2: Fetch Paginated Products (Keyset Pagination)**
+Pulls products using indexed fields with dynamic keyset bounds:
 ```sql
 SELECT
     pt.id,
@@ -1405,64 +1441,41 @@ SELECT
     COALESCE(pt.is_arrival, FALSE) AS is_arrival,
     NULLIF(pt.min_quantity, 0) AS min_quantity,
     NULLIF(pt.max_quantity, 0) AS max_quantity,
-    COALESCE(NULLIF(TRIM(pt.product_variant_count_str::text), '')::int, 0) AS total_variants,
+    COALESCE(pt.product_variant_count_str, 0) AS total_variants,
     COALESCE(pt.total_reviews, 0) AS total_review_count,
     COALESCE(pt.average_rating, 0.0) AS average_rating
 FROM product_template pt
-WHERE %s
-%s
-LIMIT $%d;
-```
-
-**Dynamic `WHERE` conditions (`%s`):**
-* Base filter:
-```sql
-pt.active = TRUE 
-  AND pt.is_for_ecommerce = TRUE 
-  AND pt.is_in_stock = TRUE 
+WHERE pt.active = TRUE
+  AND pt.is_for_ecommerce = TRUE
+  AND pt.is_in_stock = TRUE
   AND pt.x_superapp_approval_status = 'approved'
   AND pt.company_id = ANY($1)
+  -- Dynamic Filters (appended when set):
+  -- AND pt.ecomerce_category_id = $category_id
+  -- AND pt.ecommerce_float_price >= $min_price
+  -- AND pt.ecommerce_float_price <= $max_price
+  -- AND COALESCE(pt.t_is_featured, FALSE) = $featured
+  -- AND COALESCE(pt.is_halal, FALSE) = $halal
+  -- AND COALESCE(pt.is_arrival, FALSE) = $arrival
+
+  -- Dynamic Keyset Ordering:
+  -- Mode id_desc (default):
+  --   AND pt.id < $cursor_id
+  --   ORDER BY pt.id DESC
+
+  -- Mode price_desc:
+  --   AND (pt.ecommerce_float_price < $cursor_price OR (pt.ecommerce_float_price = $cursor_price AND pt.id < $cursor_id))
+  --   ORDER BY pt.ecommerce_float_price DESC, pt.id DESC
+
+  -- Mode price_asc:
+  --   AND (pt.ecommerce_float_price > $cursor_price OR (pt.ecommerce_float_price = $cursor_price AND pt.id < $cursor_id))
+  --   ORDER BY pt.ecommerce_float_price ASC, pt.id DESC
+LIMIT $limit;
+
 ```
 
-* Optional filters appended when non-nil:
-```sql
-AND pt.ecomerce_category_id = $2
-AND pt.ecommerce_float_price >= $3
-AND pt.ecommerce_float_price <= $4
-AND COALESCE(pt.t_is_featured, FALSE) = $5
-AND COALESCE(pt.is_halal, FALSE) = $6
-AND COALESCE(pt.is_arrival, FALSE) = $7
-```
-
-**Dynamic Keyset `ORDER BY` & cursor conditions (`%s`):**
-* **Default (`id_desc`):**
-```sql
--- If cursor_id is passed:
-AND pt.id < $cursor_id
-ORDER BY pt.id DESC
-```
-
-* **Price Descending (`price_desc`):**
-```sql
--- If cursor_id and cursor_price are passed:
-AND (
-    pt.ecommerce_float_price < $cursor_price 
-    OR (pt.ecommerce_float_price = $cursor_price AND pt.id < $cursor_id)
-)
-ORDER BY pt.ecommerce_float_price DESC, pt.id DESC
-```
-
-* **Price Ascending (`price_asc`):**
-```sql
--- If cursor_id and cursor_price are passed:
-AND (
-    pt.ecommerce_float_price > $cursor_price 
-    OR (pt.ecommerce_float_price = $cursor_price AND pt.id < $cursor_id)
-)
-ORDER BY pt.ecommerce_float_price ASC, pt.id DESC
-```
-
-### 19 C, Batch Hydrate Direct Product Discounts
+#### **Step 3A: Batch Hydrate Direct Product Discounts**
+Parallel discount resolution for all retrieved product IDs:
 ```sql
 SELECT DISTINCT ON (pd.product_tmpl_id)
     pd.product_tmpl_id,
@@ -1477,7 +1490,8 @@ WHERE pd.product_tmpl_id = ANY($1::bigint[])
 ORDER BY pd.product_tmpl_id, pd.id ASC;
 ```
 
-### 19 D, Batch Hydrate Loyalty Program Rewards
+#### **Step 3B: Batch Hydrate Loyalty Promotion Discounts**
+Parallel discount resolution using primary reward fields directly from `loyalty_program`:
 ```sql
 SELECT DISTINCT ON (lp.company_id)
     lp.company_id,
@@ -1485,13 +1499,14 @@ SELECT DISTINCT ON (lp.company_id)
     lp.primary_reward_discount
 FROM loyalty_program lp 
 WHERE lp.company_id = ANY($1::bigint[])
-    AND lp.program_type = 'promotion'
-    AND lp.is_ecommerce = TRUE
-    AND lp.x_superapp_approval_status = 'approved'
-    AND (lp.date_from IS NULL OR lp.date_from <= CURRENT_DATE)
-    AND (lp.date_to IS NULL OR lp.date_to >= CURRENT_DATE)
+  AND lp.program_type = 'promotion'
+  AND lp.is_ecommerce = TRUE
+  AND lp.x_superapp_approval_status = 'approved'
+  AND (lp.date_from IS NULL OR lp.date_from <= CURRENT_DATE)
+  AND (lp.date_to IS NULL OR lp.date_to >= CURRENT_DATE)
 ORDER BY lp.company_id, lp.sequence, lp.id ASC;
 ```
+
 
 ## Endpoint 20 — GET /api/v1/merchants/list_all
 Parameters:
