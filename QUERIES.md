@@ -2095,182 +2095,93 @@ WHERE b.parent_id = $2 -- Primary Key - Id from the first query merchant
 
 ## Endpoint 22 — GET /api/v1/wishlist/{user_id}
 
+** You ll need to break thi s query according to the request tha comes from mobile side. 
 
-Path: user_id          (res_partner.app_user_id)
-Query: cursor, per_page, min_price, max_price, category_id, high_to_low, order
+1, filter by `category_id` 
+2, filter by price range :- `price_from`, `price_to`
+3, sort by price (acs or desc) 
 
-Defaults: per_page=10, min_price=0, max_price=10000000
+` After running the queries u ll be calculating the actual price if there is a product of merchant level discount `
 
+```
+if there is merchant discount, the product level discount can be neglected 
 
- **Sort modes**
+```
 
-| Condition | Sort | Cursor predicate |
-|---|---|---|
-| Default (no `high_to_low`, no `order`) | `wishlist.id DESC` | `cursor_id = 0 OR f.id < cursor_id` |
-| `high_to_low=true/1/yes` or `order` present | `price DESC, id DESC` | keyset on `(price, id)` — see below |
-| `high_to_low=false/0/no` | `price ASC, id ASC` | keyset on `(price, id)` |
-| `order=asc` (without high_to_low) | `price ASC, id ASC` | keyset on `(price, id)` |
-| other `order` value | `price DESC, id DESC` | keyset on `(price, id)` |
+=> `discount_price` = `pt.price - (pt.price * discount_amount/100 )` - if discount type is `percentage`  else `pt.price - discount_amount` 
+=> `discounted_price` = `pt.price` - `discount_price`
 
-**Important:** `cursor` is always the last **`wishlist.id`** from the previous page, even when sorting by price. Do not change sort/filter between pages.
-
-Bind params (no category)
-
-$1 = app_user_id
-$2 = min_price
-$3 = max_price
-$4 = fetch_limit       (per_page + 1)
-$5 = cursor_id         (0 on first page)
-
-
-**Bind params (with category_id)**
-
-
-$1 = app_user_id
-$2 = min_price
-$3 = max_price
-$4 = category_id
-$5 = fetch_limit
-$6 = cursor_id
-
-
-Add to `filtered` WHERE: `AND pt.ecomerce_category_id = $4`
-
-Price-sort cursor predicates
-
-After resolving `cursor_row` (`SELECT id, price FROM filtered WHERE id = cursor_id`):
-
-**DESC:** `(price < cursor.price) OR (price = cursor.price AND id < cursor.id)`  
-**ASC:** `(price > cursor.price) OR (price = cursor.price AND id > cursor.id)`
-
-SQL template (default sort: id DESC)
-
-Replace `$4`/`$5` with `$5`/`$6` when using `category_id`.
 
 ```sql
-WITH input AS (
-    SELECT
-        $1::text AS app_user_id,
-        $2::float8 AS min_price,
-        $3::float8 AS max_price,
-        $4::int AS lim,
-        $5::int AS cursor_id
-),
-partner AS (
-    SELECT id FROM res_partner WHERE app_user_id = (SELECT app_user_id FROM input) LIMIT 1
-),
-guard AS (
-    SELECT EXISTS(SELECT 1 FROM partner) AS partner_exists
-),
-filtered AS (
-    SELECT
-        wl.id,
-        pt.id AS product_id,
-        COALESCE(pt.name->>'en_US', pt.name::text) AS name,
-        wl.ecommerce_float_price AS price,
-        pt.company_id,
-        COALESCE(pt.image_1920_url, '') AS product_image
-    FROM partner
-    JOIN wishlist wl ON wl.user_id = partner.id
-    JOIN product_template pt ON pt.id = wl.product_id
-    LEFT JOIN res_company rc ON rc.id = pt.company_id
-    WHERE wl.user_id = partner.id
-      AND wl.is_active = TRUE
-      AND rc.cps_enabled = TRUE
-      AND wl.ecommerce_float_price >= $2
-      AND wl.ecommerce_float_price <= $3
-      -- optional: AND pt.ecomerce_category_id = $4
-),
-cursor_row AS (
-    SELECT f.id, f.price
-    FROM filtered f
-    JOIN input i ON TRUE
-    WHERE i.cursor_id <> 0 AND f.id = i.cursor_id
-    LIMIT 1
-),
-base AS (
-    SELECT f.*
-    FROM filtered f
-    JOIN input i ON TRUE
-    WHERE i.cursor_id = 0 OR f.id < i.cursor_id   -- replace when price sorting
-    ORDER BY f.id DESC                             -- replace when price sorting
-    LIMIT (SELECT lim FROM input)
-)
 SELECT
-    g.partner_exists,
-    b.id,
-    b.product_id,
-    b.name,
-    COALESCE(rev.avg_rating, 0.0)::numeric AS avg_rating,
-    rev.total_review,
-    (SELECT COUNT(*) FROM product_product pp
-     WHERE pp.product_tmpl_id = b.product_id AND pp.active = TRUE) AS total_variants,
-    b.price,
-    b.product_image,
-    CASE
-        WHEN disc_all.discount_sum IS NOT NULL
-          OR (COALESCE(disc_listed.cnt, 0) = 0 AND loy.discount_sum IS NOT NULL)
-        THEN COALESCE(disc_all.discount_sum, 0)
-           + CASE WHEN COALESCE(disc_listed.cnt, 0) = 0
-                  THEN COALESCE(loy.discount_sum, 0) ELSE 0 END
-        ELSE NULL
-    END AS discounts,
-    COALESCE(disc_listed.discount_json, loy.discount_json) AS loyalty_programs
-FROM guard g
-LEFT JOIN base b ON g.partner_exists
-LEFT JOIN LATERAL (
-    SELECT AVG(NULLIF(pr.rating, '')::numeric) AS avg_rating, COUNT(pr.id) AS total_review
-    FROM product_review pr WHERE pr.product_template = b.product_id
-) rev ON b.product_id IS NOT NULL
-LEFT JOIN LATERAL (
-    SELECT SUM(CASE WHEN d.discount_type = 'percentage'
-        THEN ROUND((b.price - (b.price * d.discount_value / 100))::numeric, 2)
-        ELSE ROUND((b.price - d.discount_value)::numeric, 2) END) AS discount_sum
-    FROM product_discount d
-    WHERE d.product_tmpl_id = b.product_id AND d.is_active = TRUE
-      AND d.x_superapp_approval_status = 'approved'
-      AND (d.start_date IS NULL OR d.start_date <= CURRENT_DATE)
-      AND (d.end_date IS NULL OR d.end_date >= CURRENT_DATE)
-) disc_all ON b.product_id IS NOT NULL
-LEFT JOIN LATERAL (
-    SELECT COUNT(*)::int AS cnt,
-           json_agg(json_build_object(
-               'name', d.name, 'discount_type', INITCAP(d.discount_type),
-               'discount_value', d.discount_value::text,
-               'start_date', TO_CHAR(d.start_date, 'DD/MM/YY'),
-               'end_date', TO_CHAR(d.end_date, 'DD/MM/YY')
-           )) AS discount_json
-    FROM product_discount d
-    WHERE d.product_tmpl_id = b.product_id AND d.is_active = TRUE AND d.company_id IS NOT NULL
-      AND d.x_superapp_approval_status = 'approved'
-      AND (d.start_date IS NULL OR d.start_date <= CURRENT_DATE)
-      AND (d.end_date IS NULL OR d.end_date >= CURRENT_DATE)
-) disc_listed ON b.product_id IS NOT NULL
-LEFT JOIN LATERAL (
-    SELECT SUM(ROUND((CASE WHEN lr.discount_mode = 'percent'
-        THEN b.price - (b.price * lr.discount / 100) ELSE b.price - lr.discount END)::numeric, 2)) AS discount_sum,
-           json_agg(json_build_object(
-               'name', lp.name->>'en_US',
-               'discount_type', CASE WHEN lr.discount_mode = 'percent' THEN 'Percentage'
-                   ELSE INITCAP(lr.discount_mode) END,
-               'discount_value', lr.discount::text,
-               'start_date', TO_CHAR(lp.date_from, 'DD/MM/YY'),
-               'end_date', TO_CHAR(lp.date_to, 'DD/MM/YY')
-           )) AS discount_json
-    FROM loyalty_program lp
-    JOIN loyalty_reward lr ON lr.program_id = lp.id
-    WHERE COALESCE(disc_listed.cnt, 0) = 0
-      AND lp.id = (
-          SELECT lp2.id FROM loyalty_program lp2
-          WHERE lp2.company_id = b.company_id AND lp2.is_ecommerce = TRUE
-            AND lp2.x_superapp_approval_status = 'approved'
-            AND (lp2.date_from IS NULL OR lp2.date_from <= CURRENT_DATE)
-            AND (lp2.date_to IS NULL OR lp2.date_to >= CURRENT_DATE)
-          ORDER BY lp2.id LIMIT 1
-      )
-) loy ON b.product_id IS NOT NULL
-ORDER BY b.id DESC;   -- match base sort
+    w.id,
+    pt.id AS product_id,
+    pt.name->>'en_US' AS name,
+    pt.image_1920_url AS product_image,
+    pt.list_price AS untaxed_price,
+    pt.ecommerce_float_price AS price,
+    pt.company_id,
+    pt.ecomerce_category_id AS category_id
+FROM wishlist w
+INNER JOIN res_partner rp ON w.user_id = rp.id
+LEFT JOIN product_template pt ON w.product_id = pt.id
+INNER JOIN product_ecomerce_categories pec
+    ON pec.id = pt.ecomerce_category_id
+WHERE rp.app_user_id = %user_id 
+-- if filter by category
+AND pt.ecomerce_category_id = %category_id
+ -- if price_from filter
+AND pt.ecommerce_float_price >= %price_from
+
+-- if price_to filter 
+AND pt.ecommerce_float_price <= %price_to
+
+-- if order for high_to_low is true
+AND (w.id,pt.ecommerce_float_price) < (%ic_cursor,%price)
+ORDER BY pt.ecommerce_float_price ASC
+
+-- if order for high_to_low is false
+AND (w.id,pt.ecommerce_float_price) > (%ic_cursor,%price)
+ORDER BY pt.ecommerce_float_price DESC
+
+-- if order for high_to_low is nil
+AND (w.id,pt.ecommerce_float_price) < (%ic_cursor,%price)
+ORDER BY w.id DESC
+
+LIMIT %lim;
 ```
+
+## 22.2 Get Discount
+
+** get merchant discount for the wishlisted product **
+
+use company_id from the `company_id` of the previous response
+
+```
+SELECT  
+lp.primary_reward_type AS "type",
+lp.primary_reward_discount AS discount
+FROM loyalty_program lp
+INNER JOIN res_company rc ON rc.id = lp.company_id
+WHERE rc.id = $company_id
+AND lp.date_from <= CURRENT_DATE
+AND lp.date_to >= CURRENT_DATE
+AND lp.x_superapp_approval_status = 'approved';
+```
+
+## 22.3 Product level discount
+** Use the `product_id` from wishlist response
+
+```
+SELECT  pd.discount_type AS "type", pd.discount_value
+FROM product_discount pd
+INNER JOIN product_template pt ON pt.id = pd.product_tmpl_id
+WHERE pt.id = %product_id
+    AND pd.is_active AND pd.x_superapp_approval_status = 'approved'
+AND pd.start_date <= CURRENT_DATE
+AND pd.end_date >= CURRENT_DATE;
+```
+
 
 ## Endpoint 23 — GET /api/v1/driver/orders
 
@@ -2313,13 +2224,9 @@ LIMIT %lim;
 SELECT 
 c.name,
 c.logo_url as logo,
-rp.street,
-rp.city,
-rcs.name AS pickup_location
+c.street_str || ',' || c.city_str AS pickup_location
 FROM res_company c 
-LEFT JOIN res_partner rp ON rp.id = c.partner_id
-LEFT JOIN res_country_state rcs ON rp.state_id = rcs.id
-WHERE c.id = %order_from; --26;
+WHERE c.id = %order_from;
 ```
 
 
@@ -2354,7 +2261,7 @@ dop.delivery_pickup_code,
 dop.delivery_lat AS lat,
 dop.delivery_long AS lng,
 dop.customer_location,
-dop.customer_id AS custoemr_id,
+dop.customer_id AS customer_id,
 dop.delivery_notes AS additional_note
 
 FROM delivery_order dop
@@ -2382,8 +2289,6 @@ dol.uom_name->>'en_US' AS uom,
 dol.description
 FROM delivery_order_line dol
 INNER JOIN delivery_order dop ON dol.delivery_order_id = dop.id
-LEFT JOIN uom_uom uom 
-        ON dol.uom = uom.id
 LEFT JOIN product_product pp 
 	ON dol.product_variant_id = pp.id
 LEFT JOIN product_template pt 
@@ -2402,12 +2307,8 @@ c.id,
 c.name,
 c.logo_url AS logo,
 c.phone,
-rp.street,
-rp.city,
-rcs.name
+c.street_str || ',' || c.city_str AS pickup_location
 FROM res_company c 
-LEFT JOIN res_partner rp ON rp.id = c.partner_id
-LEFT JOIN res_country_state rcs ON rcs.id = rp.state_id
 WHERE c.id = %pickup_from;
 
 
@@ -2464,10 +2365,11 @@ LIMIT %lim; --10;
 
 ```
 SELECT 
+c.id,
 c.name,
-rp.street 
+c.logo_url AS logo,
+c.phone
 FROM res_company c 
-LEFT JOIN res_partner rp ON rp.id = c.partner_id
 WHERE c.id = %pickup_from; -- 26;
 
 ```
