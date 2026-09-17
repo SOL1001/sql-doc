@@ -409,250 +409,126 @@ LIMIT %lim; --10;
 
 ## Endpoint 10 — GET /api/v1/popular_products
 
+### Parameter Breakdown
+| Query Step | Parameter Placeholder | Go Source Expression | PostgreSQL Data Type | Description |
+| --- | --- | --- | --- | --- |
+| **Step 1A** | `$1` | `*merchantParam` | `text` | Target merchant identifier. |
+| **Step 1B** | *(None)* | *(None)* | *(None)* | Self-join evaluation with no bound parameters. |
+| **Step 2** | `$1` | `pq.Array(companyIDs)` | `bigint[]` | Array of company IDs resolved in Step 1. |
+| **Step 2** | Dynamic (`$2...`) | `categoryID` | `integer` | Filters by `pt.ecomerce_category_id`. |
+| **Step 2** | Dynamic | `minPrice` | `double precision` | Lower price limit (`>=`). |
+| **Step 2** | Dynamic | `maxPrice` | `double precision` | Upper price limit (`<=`). |
+| **Step 2** | Dynamic | `*halalFilter` | `boolean` | `true` or `false` match on `pt.is_halal`. |
+| **Step 2** | Dynamic (Cursor) | `*cursorSold`, `*cursorID` | `integer`, `bigint` | Keyset cursor tuple: `(sold_count, id)`. |
+| **Step 2** | Dynamic (Limit) | `fetchLimit` (`perPage + 1`) | `integer` | Keyset window limit + 1 to calculate `has_more`. |
+| **Step 3A** | `$1` | `pq.Array(productIDs)` | `bigint[]` | Array of product IDs returned from Step 2. |
+| **Step 3B** | `$1` | `pq.Array(distinctCompanyIDs)` | `bigint[]` | Deduplicated list of company IDs from the page. |
+
+#### **Step 1A: Merchant Pre-Resolution (When `merchant` is provided)**
 ```sql
-WITH normalized_params AS (
-    SELECT
-        NULLIF(TRIM(NULL), '')::bigint AS cursor_id,
-        NULLIF(TRIM(NULL), '')::integer AS cursor_sold_count,
-        NULLIF(TRIM(NULL), '')::text AS merchant,
-        GREATEST(COALESCE(NULL::int, 10), 1) AS per_page,
-        GREATEST(COALESCE(NULL::int, 500), 1) AS fetch_limit,
-        COALESCE(NULL::double precision, 0) AS min_price,
-        COALESCE(NULL::double precision, 10000000) AS max_price,
-        COALESCE(NULL::int, 0) AS category_id,
-        NULLIF(TRIM(%s), '')::text AS app_user_id, -- 'user_id'
-        CASE
-            WHEN LOWER(COALESCE(TRIM(NULL), '')) IN ('true', '1', 'yes') THEN 'sold_desc'
-            WHEN LOWER(COALESCE(TRIM(NULL), '')) IN ('false', '0', 'no') THEN 'sold_asc'
-            WHEN LOWER(COALESCE(TRIM(NULL), '')) = 'asc' THEN 'sold_asc'
-            WHEN LOWER(COALESCE(TRIM(NULL), '')) = 'desc' THEN 'sold_desc'
-            ELSE 'sold_desc'
-        END AS sort_mode,
-        CASE
-            WHEN LOWER(COALESCE(TRIM(NULL), '')) IN ('true', '1', 'yes') THEN TRUE
-            WHEN LOWER(COALESCE(TRIM(NULL), '')) IN ('false', '0', 'no') THEN FALSE
-            ELSE NULL
-        END AS halal_filter
-),
-eligible_products AS (
-    SELECT
-        pt.id AS product_id,
-        pt.company_id,
-        pt.sold_count,
-        pt.ecommerce_float_price
-    FROM product_template pt
-    JOIN res_company c ON c.id = pt.company_id
-    CROSS JOIN normalized_params r
-    WHERE pt.active = TRUE
-      AND pt.is_for_ecommerce = TRUE
-      AND pt.is_in_stock = TRUE
-      AND pt.sold_count > 0
-      AND pt.x_superapp_approval_status = 'approved'
-      AND c.cps_enabled = TRUE
-      AND COALESCE(c.is_delivery, FALSE) = FALSE
-      AND c.active = TRUE
-      AND NULLIF(TRIM(c.merchant), '') IS NOT NULL
-      AND (
-          r.merchant IS NULL
-          OR c.merchant = r.merchant
-          OR (
-              c.parent_id IS NOT NULL
-              AND EXISTS (
-                  SELECT 1
-                  FROM res_company parent_c
-                  WHERE parent_c.id = c.parent_id
-                    AND parent_c.parent_id IS NULL
-                    AND parent_c.cps_enabled = TRUE
-                    AND COALESCE(parent_c.is_delivery, FALSE) = FALSE
-                    AND parent_c.active = TRUE
-                    AND NULLIF(TRIM(parent_c.merchant), '') IS NOT NULL
-                    AND (r.merchant IS NULL OR parent_c.merchant = r.merchant)
-              )
-          )
-      )
-      AND pt.ecommerce_float_price >= r.min_price
-      AND pt.ecommerce_float_price <= r.max_price
-      AND (r.category_id = 0 OR pt.ecomerce_category_id = r.category_id)
-      AND (r.halal_filter IS NULL OR COALESCE(pt.is_halal, FALSE) = r.halal_filter)
-      AND (
-          r.cursor_id IS NULL
-          OR r.cursor_sold_count IS NULL
-          OR (
-              r.sort_mode = 'sold_desc'
-              AND (
-                  pt.sold_count < r.cursor_sold_count
-                  OR (pt.sold_count = r.cursor_sold_count AND pt.id < r.cursor_id)
-              )
-          )
-          OR (
-              r.sort_mode = 'sold_asc'
-              AND (
-                  pt.sold_count > r.cursor_sold_count
-                  OR (pt.sold_count = r.cursor_sold_count AND pt.id < r.cursor_id)
-              )
-          )
-      )
-),
-page_products AS (
-    SELECT
-        pt.id AS product_id,
-        pt.name AS product_name_raw,
-        pt.description_sale AS description_raw,
-        pt.company_id,
-        pt.sold_count,
-        pt.ecommerce_float_price,
-        pt.image_1920_url,
-        pt.t_is_featured,
-        pt.is_halal,
-        pt.is_arrival,
-        pt.total_reviews,
-        pt.average_rating,
-        COALESCE(pt.product_variant_count, 0) AS total_variants,
-        c.merchant,
-        c.name AS merchant_name
-    FROM (
-        SELECT ep.*
-        FROM eligible_products ep
-        CROSS JOIN normalized_params r
-        ORDER BY
-            CASE WHEN r.sort_mode = 'sold_asc' THEN ep.sold_count END ASC,
-            CASE WHEN r.sort_mode = 'sold_desc' THEN ep.sold_count END DESC,
-            ep.product_id DESC
-        LIMIT (SELECT LEAST(per_page + 1, fetch_limit) FROM normalized_params)
-    ) p
-    JOIN product_template pt ON pt.id = p.product_id
-    JOIN res_company c ON c.id = p.company_id
-),
-page_companies AS (
-    SELECT DISTINCT company_id
-    FROM page_products
-),
-direct_discounts AS (
-    SELECT DISTINCT ON (pd.product_tmpl_id)
-        pd.product_tmpl_id AS product_id,
-        JSONB_BUILD_ARRAY(
-            JSONB_BUILD_OBJECT(
-                'discount_type', CASE WHEN pd.discount_type IS NOT NULL THEN INITCAP(pd.discount_type) ELSE NULL END,
-                'discount_value', CASE
-                    WHEN pd.discount_value IS NULL THEN NULL
-                    WHEN pd.discount_value::numeric = TRUNC(pd.discount_value::numeric) THEN TRUNC(pd.discount_value::numeric)::text || '.0'
-                    ELSE RTRIM(RTRIM(TO_CHAR(pd.discount_value::numeric, 'FM999999999999990.999999999999'), '0'), '.')
-                END
-            )
-        ) AS discount,
-        TRUNC(
-            GREATEST(
-                pp.ecommerce_float_price::numeric / 1.15
-                - CASE
-                    WHEN pd.discount_type = 'percentage' THEN pp.ecommerce_float_price::numeric / 1.15 * pd.discount_value::numeric / 100
-                    ELSE pd.discount_value::numeric
-                  END,
-                0
-            ) + (pp.ecommerce_float_price::numeric - pp.ecommerce_float_price::numeric / 1.15),
-            2
-        ) AS product_discounts
-    FROM page_products pp
-    JOIN product_discount pd ON pd.product_tmpl_id = pp.product_id
-    WHERE pd.is_active = TRUE
-      AND pd.x_superapp_approval_status = 'approved'
-      AND (pd.start_date IS NULL OR pd.start_date <= CURRENT_DATE)
-      AND (pd.end_date IS NULL OR pd.end_date >= CURRENT_DATE)
-    ORDER BY pd.product_tmpl_id, pd.id
-),
-active_loyalty_programs AS (
-    SELECT DISTINCT ON (lp.company_id)
-        lp.id,
-        lp.company_id
-    FROM loyalty_program lp
-    JOIN page_companies pc ON pc.company_id = lp.company_id
-    WHERE lp.program_type = 'promotion'
-      AND lp.is_ecommerce = TRUE
-      AND lp.x_superapp_approval_status = 'approved'
-      AND (lp.date_from IS NULL OR lp.date_from <= CURRENT_DATE)
-      AND (lp.date_to IS NULL OR lp.date_to >= CURRENT_DATE)
-    ORDER BY lp.company_id, lp.sequence, lp.id
-),
-loyalty_discounts AS (
-    SELECT DISTINCT ON (pp.product_id)
-        pp.product_id,
-        JSONB_BUILD_ARRAY(
-            JSONB_BUILD_OBJECT(
-                'discount_type', CASE WHEN lr.discount_mode = 'percent' THEN 'Percentage' ELSE INITCAP(lr.discount_mode) END,
-                'discount_value', CASE
-                    WHEN lr.discount IS NULL THEN NULL
-                    WHEN lr.discount::numeric = TRUNC(lr.discount::numeric) THEN TRUNC(lr.discount::numeric)::text || '.0'
-                    ELSE RTRIM(RTRIM(TO_CHAR(lr.discount::numeric, 'FM999999999999990.999999999999'), '0'), '.')
-                END
-            )
-        ) AS discount,
-        TRUNC(
-            GREATEST(
-                pp.ecommerce_float_price::numeric / 1.15
-                - CASE
-                    WHEN lr.discount_mode = 'percent' THEN pp.ecommerce_float_price::numeric / 1.15 * lr.discount::numeric / 100
-                    ELSE lr.discount::numeric
-                  END,
-                0
-            ) + (pp.ecommerce_float_price::numeric - pp.ecommerce_float_price::numeric / 1.15),
-            2
-        ) AS product_discounts
-    FROM page_products pp
-    JOIN active_loyalty_programs alp ON alp.company_id = pp.company_id
-    JOIN loyalty_reward lr ON lr.program_id = alp.id
-    ORDER BY pp.product_id, lr.id
-),
-wishlist_products AS (
-    SELECT DISTINCT wpp.product_tmpl_id AS product_id
-    FROM normalized_params r
-    JOIN res_partner rp ON rp.app_user_id = r.app_user_id
-    JOIN wishlist wl ON wl.user_id = rp.id AND wl.is_active = TRUE
-    JOIN product_product wpp ON wpp.id = wl.product_id
-    JOIN page_products pp ON pp.product_id = wpp.product_tmpl_id
-    WHERE r.app_user_id IS NOT NULL
-),
-final_products AS (
-    SELECT
-        pp.*,
-        CASE WHEN dd.discount IS NOT NULL THEN dd.discount ELSE COALESCE(ld.discount, '[]'::jsonb) END AS discount,
-        CASE WHEN dd.discount IS NOT NULL THEN COALESCE(dd.product_discounts, 0) ELSE COALESCE(ld.product_discounts, 0) END AS product_discounts,
-        wp.product_id IS NOT NULL AS is_wishlisted
-    FROM page_products pp
-    LEFT JOIN direct_discounts dd ON dd.product_id = pp.product_id
-    LEFT JOIN loyalty_discounts ld ON ld.product_id = pp.product_id
-    LEFT JOIN wishlist_products wp ON wp.product_id = pp.product_id
-)
-SELECT
-    fp.product_id,
-    CASE
-        WHEN fp.product_name_raw IS NULL THEN NULL
-        WHEN jsonb_typeof(fp.product_name_raw::jsonb) = 'object' THEN COALESCE(fp.product_name_raw::jsonb ->> 'en_US', fp.product_name_raw::text)
-        ELSE fp.product_name_raw::text
-    END AS product_name,
-    CASE
-        WHEN fp.description_raw IS NULL THEN NULL
-        WHEN jsonb_typeof(fp.description_raw::jsonb) = 'object' THEN fp.description_raw::jsonb ->> 'en_US'
-        ELSE fp.description_raw::text
-    END AS description,
-    CONCAT(COALESCE(fp.sold_count, 0), ' Units') AS total_sold_qty,
-    fp.ecommerce_float_price AS list_price,
-    'ETB' AS currency,
-    CASE WHEN fp.discount <> '[]'::jsonb THEN fp.product_discounts ELSE 0 END AS product_discounts,
-    COALESCE(fp.discount, '[]'::jsonb) AS discount,
-    NULLIF(fp.image_1920_url, '') AS image,
-    COALESCE(fp.total_reviews, 0) AS total_review,
-    COALESCE(fp.average_rating, 0.0) AS average_rating,
-    COALESCE(fp.total_variants, 0) AS tototal_variants,
-    COALESCE(fp.t_is_featured, FALSE) AS is_featured,
-    COALESCE(fp.is_halal, FALSE) AS is_halal,
-    COALESCE(fp.is_arrival, FALSE) AS is_arrival,
-    fp.is_wishlisted
-FROM final_products fp
-CROSS JOIN normalized_params r
-ORDER BY
-    CASE WHEN r.sort_mode = 'sold_asc' THEN fp.sold_count END ASC,
-    CASE WHEN r.sort_mode = 'sold_desc' THEN fp.sold_count END DESC,
-    fp.product_id DESC;
+SELECT c.id
+FROM res_company c
+WHERE c.merchant = $1
+  AND c.active = TRUE
+  AND c.cps_enabled = TRUE
+  AND COALESCE(c.is_delivery, FALSE) = FALSE
+LIMIT 1;
 ```
+
+#### **Step 1B: Merchant Pre-Resolution (When `merchant` is omitted / nil)**
+```sql
+SELECT c.id
+FROM res_company c
+LEFT JOIN res_company p ON p.id = c.parent_id
+WHERE c.cps_enabled = TRUE
+  AND COALESCE(c.is_delivery, FALSE) = FALSE
+  AND c.active = TRUE
+  AND NULLIF(TRIM(c.merchant::text), '') IS NOT NULL
+  AND (
+      c.parent_id IS NULL 
+      OR (
+          p.parent_id IS NULL 
+          AND p.cps_enabled = TRUE 
+          AND COALESCE(p.is_delivery, FALSE) = FALSE 
+          AND p.active = TRUE 
+          AND NULLIF(TRIM(p.merchant::text), '') IS NOT NULL
+      )
+  );
+```
+
+
+#### **Step 2: Fetch Products by Popularity (Keyset Pagination)**
+```sql
+SELECT
+    pt.id,
+    pt.name ->> 'en_US' AS name,
+    NULLIF(pt.description_sale ->> 'en_US', '') AS product_description,
+    NULLIF(pt.image_1920_url, '') AS product_image,
+    pt.ecommerce_float_price AS list_price,
+    pt.company_id,
+    COALESCE(pt.sold_count, 0) AS sold_count,
+    COALESCE(pt.t_is_featured, FALSE) AS is_featured,
+    COALESCE(pt.is_halal, FALSE) AS is_halal,
+    COALESCE(pt.is_arrival, FALSE) AS is_arrival,
+    COALESCE(NULLIF(TRIM(pt.product_variant_count_str::text), '')::int, 0) AS total_variants,
+    COALESCE(pt.total_reviews, 0) AS total_review_count,
+    COALESCE(pt.average_rating, 0.0) AS average_rating
+FROM product_template pt
+WHERE pt.active = TRUE
+  AND pt.is_for_ecommerce = TRUE
+  AND pt.is_in_stock = TRUE
+  AND pt.sold_count > 0
+  AND pt.x_superapp_approval_status = 'approved'
+  AND pt.company_id = ANY($1)
+  -- Dynamic filter clauses (appended conditionally):
+  -- AND pt.ecomerce_category_id = $category_id
+  -- AND pt.ecommerce_float_price >= $min_price
+  -- AND pt.ecommerce_float_price <= $max_price
+  -- AND COALESCE(pt.is_halal, FALSE) = $halal_filter
+  -- Keyset cursor clause:
+  -- When sort_mode = 'sold_asc':
+  --   AND (pt.sold_count > $cursor_sold OR (pt.sold_count = $cursor_sold AND pt.id < $cursor_id))
+  --   ORDER BY pt.sold_count ASC, pt.id DESC
+  -- When sort_mode = 'sold_desc' (default):
+  --   AND (pt.sold_count < $cursor_sold OR (pt.sold_count = $cursor_sold AND pt.id < $cursor_id))
+  --   ORDER BY pt.sold_count DESC, pt.id DESC
+LIMIT $limit;
+
+```
+
+
+#### **Step 3A: Batch Direct Product Discounts**
+```sql
+SELECT DISTINCT ON (pd.product_tmpl_id)
+    pd.product_tmpl_id,
+    pd.discount_type,
+    pd.discount_value
+FROM product_discount pd
+WHERE pd.product_tmpl_id = ANY($1::bigint[])
+  AND pd.is_active = TRUE
+  AND pd.x_superapp_approval_status = 'approved'
+  AND (pd.start_date IS NULL OR pd.start_date <= CURRENT_DATE)
+  AND (pd.end_date IS NULL OR pd.end_date >= CURRENT_DATE)
+ORDER BY pd.product_tmpl_id, pd.id ASC;
+```
+
+#### **Step 3B: Batch Loyalty Program Promotion Rewards**
+```sql
+SELECT DISTINCT ON (lp.company_id)
+    lp.company_id,
+    lp.primary_reward_discount_mode,
+    lp.primary_reward_discount
+FROM loyalty_program lp 
+WHERE lp.company_id = ANY($1::bigint[])
+  AND lp.program_type = 'promotion'
+  AND lp.is_ecommerce = TRUE
+  AND lp.x_superapp_approval_status = 'approved'
+  AND (lp.date_from IS NULL OR lp.date_from <= CURRENT_DATE)
+  AND (lp.date_to IS NULL OR lp.date_to >= CURRENT_DATE)
+ORDER BY lp.company_id, lp.sequence, lp.id ASC;
+```
+
+
 
 ## Endpoint 11 — GET /api/v1/{merchant:string}/popular_merchant_products
 
