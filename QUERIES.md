@@ -1527,6 +1527,32 @@ WHERE child.parent_id = 12 -- catgoryid 1
 
 
 ## Endpoint 28 — GET /api/v1/product/{product_tmpl_id:int}
+**1. API & Routing Parameters**
+| Parameter | Type | Source | Description |
+| --- | --- | --- | --- |
+| `product_id` | `int64` | URL Path (`/api/v1/products/{id}`) | Parsed using `strconv.ParseInt()`. The primary key of the target `product_template`. Halts with `400 Bad Request` if invalid or $\le 0$. |
+| `companyID` | `int64` | Database (`pt.company_id`) | Derived dynamically from Step 1A's scan. Serves as the foreign key to locate merchant details and merchant-wide loyalty rules. |
+
+**2. SQL Placeholder Parameters (`$1`)**
+Every query in the concurrent pipeline uses single-parameter positional binding (`$1`):
+| Query | Table / Purpose | `$1` Source Variable | Data Type | Filter Predicate |
+| --- | --- | --- | --- | --- |
+| **1A** | `product_template` | `productID` | `BIGINT` | `WHERE pt.id = $1` |
+| **1B** | `res_company` | `companyID` | `BIGINT` | `WHERE c.id = $1` |
+| **2A** | `product_discount` | `productID` | `BIGINT` | `WHERE pd.product_tmpl_id = $1` |
+| **2B** | `loyalty_program` | `companyID` | `BIGINT` | `WHERE lp.company_id = $1` |
+| **2C** | `ecomerce_product` | `productID` | `BIGINT` | `WHERE ep.product_id = $1` |
+| **2D** | `product_video_url` | `productID` | `BIGINT` | `WHERE pv.product_tmpl_id = $1` |
+| **2E** | `product_template_attribute_line` | `productID` | `BIGINT` | `WHERE ptal.product_tmpl_id = $1` |
+| **2F-1** | `product_product` | `productID` | `BIGINT` | `WHERE v.product_tmpl_id = $1` |
+| **2F-2** | `product_variant_combination` | `productID` | `BIGINT` | `WHERE v.product_tmpl_id = $1` |
+
+**3. Business Logic & Calculation Parameters**
+Parameters passed into `CalculateFinalPrice(listPrice, mode, val)` to compute `product_discounts` per variant:
+* **`listPrice`** (`float64`): Variant-level base price from `v.ecommerce_float_price`.
+* **`mode`** (`string`): Discount unit type (`"Percentage"`, `"Percent"`, or `"Fixed"`), resolved from `pd.discount_type` or `lp.primary_reward_discount_mode`.
+* **`val`** (`float64`): Discount amount or percentage figure from `pd.discount_value` or `lp.primary_reward_discount`.
+
 **Query 1A: Base Template (Direct lookup by Product ID)**
 ```sql
 SELECT
@@ -1632,31 +1658,6 @@ ORDER BY pa.id ASC, pav.id ASC;
 ```
 
 **Query 2F-1: Concrete Product Variants (Lookup by Product ID)**
-**1. API & Routing Parameters**
-| Parameter | Type | Source | Description |
-| --- | --- | --- | --- |
-| `product_id` | `int64` | URL Path (`/api/v1/products/{id}`) | Parsed using `strconv.ParseInt()`. The primary key of the target `product_template`. Halts with `400 Bad Request` if invalid or $\le 0$. |
-| `companyID` | `int64` | Database (`pt.company_id`) | Derived dynamically from Step 1A's scan. Serves as the foreign key to locate merchant details and merchant-wide loyalty rules. |
-
-**2. SQL Placeholder Parameters (`$1`)**
-Every query in the concurrent pipeline uses single-parameter positional binding (`$1`):
-| Query | Table / Purpose | `$1` Source Variable | Data Type | Filter Predicate |
-| --- | --- | --- | --- | --- |
-| **1A** | `product_template` | `productID` | `BIGINT` | `WHERE pt.id = $1` |
-| **1B** | `res_company` | `companyID` | `BIGINT` | `WHERE c.id = $1` |
-| **2A** | `product_discount` | `productID` | `BIGINT` | `WHERE pd.product_tmpl_id = $1` |
-| **2B** | `loyalty_program` | `companyID` | `BIGINT` | `WHERE lp.company_id = $1` |
-| **2C** | `ecomerce_product` | `productID` | `BIGINT` | `WHERE ep.product_id = $1` |
-| **2D** | `product_video_url` | `productID` | `BIGINT` | `WHERE pv.product_tmpl_id = $1` |
-| **2E** | `product_template_attribute_line` | `productID` | `BIGINT` | `WHERE ptal.product_tmpl_id = $1` |
-| **2F-1** | `product_product` | `productID` | `BIGINT` | `WHERE v.product_tmpl_id = $1` |
-| **2F-2** | `product_variant_combination` | `productID` | `BIGINT` | `WHERE v.product_tmpl_id = $1` |
-
-**3. Business Logic & Calculation Parameters**
-Parameters passed into `CalculateFinalPrice(listPrice, mode, val)` to compute `product_discounts` per variant:
-* **`listPrice`** (`float64`): Variant-level base price from `v.ecommerce_float_price`.
-* **`mode`** (`string`): Discount unit type (`"Percentage"`, `"Percent"`, or `"Fixed"`), resolved from `pd.discount_type` or `lp.primary_reward_discount_mode`.
-* **`val`** (`float64`): Discount amount or percentage figure from `pd.discount_value` or `lp.primary_reward_discount`.
 
 ```sql
 SELECT
@@ -1694,6 +1695,7 @@ JOIN product_attribute pa ON pa.id = pav.attribute_id
 WHERE v.product_tmpl_id = $1
 ORDER BY pa.id ASC, pav.id ASC;
 ```
+
 
 ## Endpoint 29 — GET /api/v1/delivery/service_providers
 
