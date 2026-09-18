@@ -1527,249 +1527,172 @@ WHERE child.parent_id = 12 -- catgoryid 1
 
 
 ## Endpoint 28 — GET /api/v1/product/{product_tmpl_id:int}
-
+**Query 1A: Base Template (Direct lookup by Product ID)**
 ```sql
--- EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
 SELECT
     pt.id,
-    pt.name ->> 'en_US' AS name,
-    CASE WHEN cat.id IS NOT NULL THEN JSONB_BUILD_OBJECT('id', cat.id, 'name', cat.name) ELSE NULL END AS product_category,
+    COALESCE(pt.name ->> 'en_US', '') AS name,
+    COALESCE(cat.name, '') AS category_name,
     COALESCE(pt.description_sale ->> 'en_US', '') AS product_description,
-    NULLIF(pt.image_1920_url, '') AS product_image,
-    COALESCE(videos.videos, '[]'::jsonb) AS video_urls,
-    JSONB_BUILD_ARRAY(
-        JSONB_BUILD_OBJECT('field', 'image_1', 'url', NULLIF(pt.image_1_url, '')),
-        JSONB_BUILD_OBJECT('field', 'image_2', 'url', NULLIF(pt.image_2_url, '')),
-        JSONB_BUILD_OBJECT('field', 'image_3', 'url', NULLIF(pt.image_3_url, '')),
-        JSONB_BUILD_OBJECT('field', 'image_4', 'url', NULLIF(pt.image_4_url, '')),
-        JSONB_BUILD_OBJECT('field', 'image_5', 'url', NULLIF(pt.image_5_url, '')),
-        JSONB_BUILD_OBJECT('field', 'image_6', 'url', NULLIF(pt.image_6_url, ''))
-    ) AS product_images,
-    ROUND(pt.ecommerce_float_price::numeric, 2) AS list_price,
-    CASE WHEN direct_discount.discount IS NOT NULL THEN direct_discount.discount ELSE COALESCE(loyalty_discount.discount, '[]'::jsonb) END AS discount,
-    CASE WHEN direct_discount.discount IS NOT NULL THEN COALESCE(direct_discount.product_discounts, 0) ELSE COALESCE(loyalty_discount.product_discounts, 0) END AS product_discounts,
+    pt.company_id,
     COALESCE(pt.t_is_featured, FALSE) AS is_featured,
     COALESCE(pt.is_halal, FALSE) AS is_halal,
     COALESCE(pt.is_arrival, FALSE) AS is_arrival,
-    COALESCE(variant_types.variant_type, '[]'::jsonb) AS variants_types,
-    COALESCE(variants.total_variants, 0) AS total_variants,
-    COALESCE(variants.variants, '[]'::jsonb) AS variants,
-    COALESCE(specifications.specifications, '[]'::jsonb) AS specifications,
-    JSONB_BUILD_OBJECT(
-        'merchant', c.merchant,
-        'name', c.name,
-        'logo', NULLIF(c.logo_url, ''),
-        'lat_location', c.lat_location,
-        'lng_location', c.lng_location,
-        'city', rp.city,
-        'state', st.name
-    ) AS merchant_info,
-    NULLIF(pt.min_quantity, 0) AS min_quantity,
-    NULLIF(pt.max_quantity, 0) AS max_quantity,
-    reviews.average_rating,
-    COALESCE(reviews.total_reviews, 0) AS total_reviews
+    COALESCE(pt.min_quantity, 0) AS min_quantity,
+    COALESCE(pt.max_quantity, 0) AS max_quantity,
+    COALESCE(pt.total_reviews, 0) AS total_reviews,
+    ROUND(COALESCE(pt.average_rating, 0.0)::numeric, 2) AS average_rating
 FROM product_template pt
-JOIN res_company c ON c.id = pt.company_id
-LEFT JOIN res_partner rp ON rp.id = c.partner_id
-LEFT JOIN res_country_state st ON st.id = rp.state_id
 LEFT JOIN product_ecomerce_categories cat ON cat.id = pt.ecomerce_category_id
-LEFT JOIN LATERAL (
-    SELECT
-        JSONB_AGG(
-            JSONB_BUILD_OBJECT(
-                'discount_type', CASE WHEN pd.discount_type IS NOT NULL THEN INITCAP(pd.discount_type) ELSE NULL END,
-                'discount_value', CASE
-                    WHEN pd.discount_value IS NULL THEN NULL
-                    WHEN pd.discount_value::numeric = TRUNC(pd.discount_value::numeric) THEN TRUNC(pd.discount_value::numeric)::text || '.0'
-                    ELSE RTRIM(RTRIM(TO_CHAR(pd.discount_value::numeric, 'FM999999999999990.999999999999'), '0'), '.')
-                END
-            ) ORDER BY pd.id
-        ) AS discount,
-        TRUNC(
-            SUM(
-                GREATEST(
-                    (pt.ecommerce_float_price::numeric / 1.15::numeric)
-                    - CASE
-                        WHEN pd.discount_type = 'percentage' THEN (pt.ecommerce_float_price::numeric / 1.15::numeric) * pd.discount_value::numeric / 100
-                        ELSE pd.discount_value::numeric
-                    END,
-                    0::numeric
-                ) + (pt.ecommerce_float_price::numeric - pt.ecommerce_float_price::numeric / 1.15::numeric)
-            ),
-            2
-        ) AS product_discounts
-    FROM product_discount pd
-    WHERE pd.product_tmpl_id = pt.id
-      AND pd.is_active = TRUE
-      AND pd.x_superapp_approval_status = 'approved'
-      AND (pd.start_date IS NULL OR pd.start_date <= CURRENT_DATE)
-      AND (pd.end_date IS NULL OR pd.end_date >= CURRENT_DATE)
-) direct_discount ON TRUE
-LEFT JOIN LATERAL (
-    SELECT
-        JSONB_AGG(
-            JSONB_BUILD_OBJECT(
-                'discount_type', CASE WHEN lr.discount_mode = 'percent' THEN 'Percentage' ELSE INITCAP(lr.discount_mode) END,
-                'discount_value', CASE
-                    WHEN lr.discount IS NULL THEN NULL
-                    WHEN lr.discount::numeric = TRUNC(lr.discount::numeric) THEN TRUNC(lr.discount::numeric)::text || '.0'
-                    ELSE RTRIM(RTRIM(TO_CHAR(lr.discount::numeric, 'FM999999999999990.999999999999'), '0'), '.')
-                END
-            ) ORDER BY lr.id
-        ) AS discount,
-        TRUNC(
-            SUM(
-                GREATEST(
-                    (pt.ecommerce_float_price::numeric / 1.15::numeric)
-                    - CASE
-                        WHEN lr.discount_mode = 'percent' THEN (pt.ecommerce_float_price::numeric / 1.15::numeric) * lr.discount::numeric / 100
-                        ELSE lr.discount::numeric
-                    END,
-                    0::numeric
-                ) + (pt.ecommerce_float_price::numeric - pt.ecommerce_float_price::numeric / 1.15::numeric)
-            ),
-            2
-        ) AS product_discounts
-    FROM loyalty_reward lr
-    JOIN loyalty_program lp ON lp.id = lr.program_id
-    WHERE lp.id = (
-        SELECT lp2.id
-        FROM loyalty_program lp2
-        WHERE lp2.company_id = pt.company_id
-          AND lp2.program_type = 'promotion'
-          AND lp2.is_ecommerce = TRUE
-          AND lp2.x_superapp_approval_status = 'approved'
-          AND (lp2.date_from IS NULL OR lp2.date_from <= CURRENT_DATE)
-          AND (lp2.date_to IS NULL OR lp2.date_to >= CURRENT_DATE)
-        ORDER BY lp2.sequence, lp2.id
-        LIMIT 1
-    )
-) loyalty_discount ON TRUE
-LEFT JOIN LATERAL (
-    SELECT COUNT(*)::int AS total_reviews, ROUND(AVG(pr.rating::numeric), 2) AS average_rating
-    FROM product_review pr
-    WHERE pr.product_template = pt.id
-) reviews ON TRUE
-LEFT JOIN LATERAL (
-    SELECT JSONB_AGG(
-        JSONB_BUILD_OBJECT(
-            'id', ep.id,
-            'spec', es.name,
-            'value', ep.value,
-            'icon', NULLIF(es.icon_url, '')
-        ) ORDER BY ep.id
-    ) AS specifications
-    FROM ecomerce_product ep
-    JOIN ecomerce_specs es ON es.id = ep.spec
-    WHERE ep.product_id = pt.id
-) specifications ON TRUE
-LEFT JOIN LATERAL (
-    SELECT JSONB_AGG(
-        JSONB_BUILD_OBJECT(
-            'id', a.attribute_id,
-            'attribute', a.attribute_name,
-            'values', a.values_json
-        ) ORDER BY a.attribute_id
-    ) AS variant_type
-    FROM (
-        SELECT
-            pa.id AS attribute_id,
-            pa.name ->> 'en_US' AS attribute_name,
-            JSONB_AGG(
-                JSONB_BUILD_OBJECT('id', pav.id, 'name', pav.name ->> 'en_US')
-                ORDER BY pav.id
-            ) AS values_json
-        FROM product_template_attribute_line ptal
-        JOIN product_attribute pa ON pa.id = ptal.attribute_id
-        JOIN product_attribute_value_product_template_attribute_line_rel rel ON rel.product_template_attribute_line_id = ptal.id
-        JOIN product_attribute_value pav ON pav.id = rel.product_attribute_value_id
-        WHERE ptal.product_tmpl_id = pt.id
-        GROUP BY pa.id, pa.name ->> 'en_US'
-    ) a
-) variant_types ON TRUE
-LEFT JOIN LATERAL (
-    SELECT
-        COUNT(v.id)::int AS total_variants,
-        JSONB_AGG(
-            JSONB_BUILD_OBJECT(
-                'id', v.id,
-                'name', COALESCE(vt.name ->> 'en_US', ''),
-                'product_category', CASE WHEN cat_v.id IS NOT NULL THEN cat_v.name ELSE 'General' END,
-                'product_description', COALESCE(vt.description_sale ->> 'en_US', ''),
-                'list_price', v.ecommerce_float_price,
-                'product_image', COALESCE(NULLIF(v.image_1920_url, ''), NULLIF(pt.image_1920_url, '')),
-                'product_images', JSONB_BUILD_ARRAY(
-                    JSONB_BUILD_OBJECT('field', 'image_1', 'url', COALESCE(NULLIF(v.image_1_url, ''), NULLIF(pt.image_1_url, ''))),
-                    JSONB_BUILD_OBJECT('field', 'image_2', 'url', COALESCE(NULLIF(v.image_2_url, ''), NULLIF(pt.image_2_url, ''))),
-                    JSONB_BUILD_OBJECT('field', 'image_3', 'url', COALESCE(NULLIF(v.image_3_url, ''), NULLIF(pt.image_3_url, ''))),
-                    JSONB_BUILD_OBJECT('field', 'image_4', 'url', COALESCE(NULLIF(v.image_4_url, ''), NULLIF(pt.image_4_url, ''))),
-                    JSONB_BUILD_OBJECT('field', 'image_5', 'url', COALESCE(NULLIF(v.image_5_url, ''), NULLIF(pt.image_5_url, ''))),
-                    JSONB_BUILD_OBJECT('field', 'image_6', 'url', COALESCE(NULLIF(v.image_6_url, ''), NULLIF(pt.image_6_url, '')))
-                ),
-                'qty_available', COALESCE(v.api_qty_available, 0),
-                'virtual_available', COALESCE(v.api_virtual_available, 0),
-                'variants_types', COALESCE(attrs.attributes, '[]'::jsonb),
-                'is_featured', COALESCE(v.v_is_featured, FALSE),
-                'discount', CASE WHEN direct_discount.discount IS NOT NULL THEN direct_discount.discount ELSE COALESCE(loyalty_discount.discount, '[]'::jsonb) END,
-                'product_discounts', CASE WHEN direct_discount.discount IS NOT NULL THEN COALESCE(direct_discount.product_discounts, 0) ELSE COALESCE(loyalty_discount.product_discounts, 0) END
-            ) ORDER BY v.id
-        ) AS variants
-    FROM product_product v
-    JOIN product_template vt ON vt.id = v.product_tmpl_id AND vt.x_superapp_approval_status = 'approved'
-    LEFT JOIN product_ecomerce_categories cat_v ON cat_v.id = vt.ecomerce_category_id
-    LEFT JOIN LATERAL (
-        SELECT JSONB_AGG(
-            JSONB_BUILD_OBJECT(
-                'id', pa.id,
-                'attribute', pa.name ->> 'en_US',
-                'value_id', pav.id,
-                'value', pav.name ->> 'en_US'
-            ) ORDER BY pa.id, pav.id
-        ) AS attributes
-        FROM product_variant_combination pvc
-        JOIN product_template_attribute_value ptav ON ptav.id = pvc.product_template_attribute_value_id
-        JOIN product_attribute_value pav ON pav.id = ptav.product_attribute_value_id
-        JOIN product_attribute pa ON pa.id = pav.attribute_id
-        WHERE pvc.product_product_id = v.id
-    ) attrs ON TRUE
-    WHERE v.product_tmpl_id = pt.id
-      AND v.active = TRUE
-    GROUP BY pt.id
-) variants ON TRUE
-LEFT JOIN LATERAL (
-    SELECT JSONB_AGG(
-        JSONB_BUILD_OBJECT(
-            'video_url', pv.url,
-            'thumbnail_url', NULLIF(pv.video_thumbnail_url, '')
-        ) ORDER BY pv.id
-    ) AS videos
-    FROM product_video_url pv
-    WHERE pv.product_tmpl_id = pt.id
-      AND pv.url IS NOT NULL
-      AND pv.url ILIKE '%m3u8%'
-) videos ON TRUE
-WHERE pt.id = %s --Productid
+WHERE pt.id = $1
   AND pt.active = TRUE
   AND pt.is_for_ecommerce = TRUE
   AND pt.x_superapp_approval_status = 'approved'
+LIMIT 1;
+```
+
+**Query 1B: Merchant Details (Lookup by Company ID)**
+```sql
+SELECT
+    COALESCE(c.merchant, '') AS merchant,
+    c.name AS merchant_name,
+    COALESCE(c.logo_url, '') AS merchant_logo,
+    COALESCE(c.lat_location, 0.0) AS lat_location,
+    COALESCE(c.lng_location, 0.0) AS lng_location,
+    COALESCE(c.city_str, '') AS city
+FROM res_company c
+WHERE c.id = $1
+  AND c.active = TRUE
   AND c.cps_enabled = TRUE
   AND COALESCE(c.is_delivery, FALSE) = FALSE
-  AND c.active = TRUE
-  AND NULLIF(TRIM(c.merchant), '') IS NOT NULL
-  AND (
-      c.parent_id IS NULL
-      OR EXISTS (
-          SELECT 1
-          FROM res_company parent_c
-          WHERE parent_c.id = c.parent_id
-            AND parent_c.parent_id IS NULL
-            AND parent_c.cps_enabled = TRUE
-            AND COALESCE(parent_c.is_delivery, FALSE) = FALSE
-            AND parent_c.active = TRUE
-            AND NULLIF(TRIM(parent_c.merchant), '') IS NOT NULL
-      )
-  )
-LIMIT 1; 
+LIMIT 1;
+```
+
+**Query 2A: Direct Item Discounts (Lookup by Product ID)**
+```sql
+SELECT pd.discount_type, pd.discount_value
+FROM product_discount pd
+WHERE pd.product_tmpl_id = $1
+  AND pd.is_active = TRUE
+  AND pd.x_superapp_approval_status = 'approved'
+  AND (pd.start_date IS NULL OR pd.start_date <= CURRENT_DATE)
+  AND (pd.end_date IS NULL OR pd.end_date >= CURRENT_DATE)
+ORDER BY pd.id ASC;
+```
+
+**Query 2B: Merchant Loyalty Promotion (Lookup by Company ID)**
+```sql
+SELECT lp.primary_reward_discount_mode, lp.primary_reward_discount
+FROM loyalty_program lp
+WHERE lp.company_id = $1
+  AND lp.program_type = 'promotion'
+  AND lp.is_ecommerce = TRUE
+  AND lp.x_superapp_approval_status = 'approved'
+  AND (lp.date_from IS NULL OR lp.date_from <= CURRENT_DATE)
+  AND (lp.date_to IS NULL OR lp.date_to >= CURRENT_DATE)
+ORDER BY lp.sequence, lp.id ASC
+LIMIT 1;
+
+```
+
+**Query 2C: Product Specifications (Lookup by Product ID)**
+```sql
+SELECT ep.id, COALESCE(es.name, ''), COALESCE(ep.value, ''), COALESCE(es.icon_url, '')
+FROM ecomerce_product ep
+JOIN ecomerce_specs es ON es.id = ep.spec
+WHERE ep.product_id = $1
+ORDER BY ep.id ASC;
+```
+
+**Query 2D: Product Video URLs (Lookup by Product ID)**
+```sql
+SELECT pv.url, COALESCE(pv.video_thumbnail_url, '')
+FROM product_video_url pv
+WHERE pv.product_tmpl_id = $1
+  AND pv.url IS NOT NULL
+  AND pv.url ILIKE '%m3u8%'
+ORDER BY pv.id ASC;
+```
+
+**Query 2E: Variant Attribute Types & Values (Lookup by Product ID)**
+```sql
+SELECT
+    pa.id,
+    COALESCE(pa.name ->> 'en_US', ''),
+    pav.id,
+    COALESCE(pav.name ->> 'en_US', '')
+FROM product_template_attribute_line ptal
+JOIN product_attribute pa ON pa.id = ptal.attribute_id
+JOIN product_attribute_value_product_template_attribute_line_rel rel 
+  ON rel.product_template_attribute_line_id = ptal.id
+JOIN product_attribute_value pav 
+  ON pav.id = rel.product_attribute_value_id
+WHERE ptal.product_tmpl_id = $1
+ORDER BY pa.id ASC, pav.id ASC;
+```
+
+**Query 2F-1: Concrete Product Variants (Lookup by Product ID)**
+**1. API & Routing Parameters**
+| Parameter | Type | Source | Description |
+| --- | --- | --- | --- |
+| `product_id` | `int64` | URL Path (`/api/v1/products/{id}`) | Parsed using `strconv.ParseInt()`. The primary key of the target `product_template`. Halts with `400 Bad Request` if invalid or $\le 0$. |
+| `companyID` | `int64` | Database (`pt.company_id`) | Derived dynamically from Step 1A's scan. Serves as the foreign key to locate merchant details and merchant-wide loyalty rules. |
+
+**2. SQL Placeholder Parameters (`$1`)**
+Every query in the concurrent pipeline uses single-parameter positional binding (`$1`):
+| Query | Table / Purpose | `$1` Source Variable | Data Type | Filter Predicate |
+| --- | --- | --- | --- | --- |
+| **1A** | `product_template` | `productID` | `BIGINT` | `WHERE pt.id = $1` |
+| **1B** | `res_company` | `companyID` | `BIGINT` | `WHERE c.id = $1` |
+| **2A** | `product_discount` | `productID` | `BIGINT` | `WHERE pd.product_tmpl_id = $1` |
+| **2B** | `loyalty_program` | `companyID` | `BIGINT` | `WHERE lp.company_id = $1` |
+| **2C** | `ecomerce_product` | `productID` | `BIGINT` | `WHERE ep.product_id = $1` |
+| **2D** | `product_video_url` | `productID` | `BIGINT` | `WHERE pv.product_tmpl_id = $1` |
+| **2E** | `product_template_attribute_line` | `productID` | `BIGINT` | `WHERE ptal.product_tmpl_id = $1` |
+| **2F-1** | `product_product` | `productID` | `BIGINT` | `WHERE v.product_tmpl_id = $1` |
+| **2F-2** | `product_variant_combination` | `productID` | `BIGINT` | `WHERE v.product_tmpl_id = $1` |
+
+**3. Business Logic & Calculation Parameters**
+Parameters passed into `CalculateFinalPrice(listPrice, mode, val)` to compute `product_discounts` per variant:
+* **`listPrice`** (`float64`): Variant-level base price from `v.ecommerce_float_price`.
+* **`mode`** (`string`): Discount unit type (`"Percentage"`, `"Percent"`, or `"Fixed"`), resolved from `pd.discount_type` or `lp.primary_reward_discount_mode`.
+* **`val`** (`float64`): Discount amount or percentage figure from `pd.discount_value` or `lp.primary_reward_discount`.
+
+```sql
+SELECT
+    v.id,
+    COALESCE(vt.name ->> 'en_US', '') AS base_name,
+    v.ecommerce_float_price AS list_price,
+    COALESCE(v.image_1920_url, vt.image_1920_url, '') AS product_image,
+    COALESCE(v.image_1_url, vt.image_1_url, '') AS image_1,
+    COALESCE(v.image_2_url, vt.image_2_url, '') AS image_2,
+    COALESCE(v.image_3_url, vt.image_3_url, '') AS image_3,
+    COALESCE(v.image_4_url, vt.image_4_url, '') AS image_4,
+    COALESCE(v.image_5_url, vt.image_5_url, '') AS image_5,
+    COALESCE(v.image_6_url, vt.image_6_url, '') AS image_6,
+    COALESCE(v.api_virtual_available, 0) AS virtual_available
+FROM product_product v
+JOIN product_template vt ON vt.id = v.product_tmpl_id AND vt.x_superapp_approval_status = 'approved'
+WHERE v.product_tmpl_id = $1
+  AND v.active = TRUE
+ORDER BY v.id ASC;
+```
+
+**Query 2F-2: Variant Attribute Value Combinations (Lookup by Product ID)**
+```sql
+SELECT
+    pvc.product_product_id,
+    pa.id,
+    COALESCE(pa.name ->> 'en_US', ''),
+    pav.id,
+    COALESCE(pav.name ->> 'en_US', '')
+FROM product_variant_combination pvc
+JOIN product_product v ON v.id = pvc.product_product_id
+JOIN product_template_attribute_value ptav ON ptav.id = pvc.product_template_attribute_value_id
+JOIN product_attribute_value pav ON pav.id = ptav.product_attribute_value_id
+JOIN product_attribute pa ON pa.id = pav.attribute_id
+WHERE v.product_tmpl_id = $1
+ORDER BY pa.id ASC, pav.id ASC;
 ```
 
 ## Endpoint 29 — GET /api/v1/delivery/service_providers
