@@ -2175,7 +2175,7 @@ INNER JOIN res_users ru ON dop.driver_assigned = ru.partner_id
 WHERE 
  ru.token = %s --'98db652e5c1d9e6e0c1a8eb4abb669fa'
     AND ru.token_expiration_time > NOW()
-   AND dop.state IN ('driver', 'picked')
+   AND dop.state IN ('driver', 'picked','delivered')
    AND dop.id = %s; --50;
 ```
 
@@ -2186,20 +2186,45 @@ WHERE
 do_id = delivery order id
 
 ```sql
-SELECT 
-dol.id AS id,
-pt.name->>'en_US' AS name,
-pp.image_1920_url AS image,
-dol.quantity AS quantity,
-dol.uom_name->>'en_US' AS uom,
-dol.description
+SELECT
+    dol.id AS id,
+    CONCAT(
+        pt.name->>'en_US',
+        CASE
+            WHEN STRING_AGG(pav.name->>'en_US', ', ' ORDER BY pav.name->>'en_US') IS NOT NULL
+            THEN CONCAT(
+                ' (',
+                STRING_AGG(pav.name->>'en_US', ', ' ORDER BY pav.name->>'en_US'),
+                ')'
+            )
+            ELSE ''
+        END
+    ) AS name,
+    pp.image_1920_url AS image,
+    dol.quantity AS quantity,
+    dol.uom_name->>'en_US' AS uom,
+    dol.description
 FROM delivery_order_line dol
-INNER JOIN delivery_order dop ON dol.delivery_order_id = dop.id
-LEFT JOIN product_product pp 
-	ON dol.product_variant_id = pp.id
-LEFT JOIN product_template pt 
-	ON pp.product_tmpl_id = pt.id
-WHERE dop.id = %do_id; --50;
+INNER JOIN delivery_order dop
+    ON dol.delivery_order_id = dop.id
+LEFT JOIN product_product pp
+    ON dol.product_variant_id = pp.id
+LEFT JOIN product_template pt
+    ON pp.product_tmpl_id = pt.id
+LEFT JOIN product_variant_combination pvc
+    ON pvc.product_product_id = pp.id
+LEFT JOIN product_template_attribute_value ptav
+    ON pvc.product_template_attribute_value_id = ptav.id
+LEFT JOIN product_attribute_value pav
+    ON ptav.product_attribute_value_id = pav.id
+WHERE dop.id = %s --50
+GROUP BY
+    dol.id,
+    pt.name,
+    pp.image_1920_url,
+    dol.quantity,
+    dol.uom_name,
+    dol.description;
 ```
 
 ## 24.3 Get Order Company 
@@ -2226,7 +2251,7 @@ WHERE c.id = %pickup_from;
 ```
 SELECT 
 c.name,
-c.phone,
+c.mobile,
 cs.name AS location
 FROM res_partner c
 LEFT JOIN res_country_state cs ON c.state_id = cs.id
