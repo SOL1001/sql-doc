@@ -1215,14 +1215,18 @@ if there is merchant discount, the product level discount can be neglected
 
 ```sql
 SELECT
-    w.id,
-    pt.id AS product_id,
-    pt.name->>'en_US' AS name,
-    pt.image_1920_url AS product_image,
+     w.id,
+    pt.id AS "product_id",
+    pt.name->>'en_US' AS "name",
+    pt.image_1920_url AS "product_image",
     pt.list_price AS untaxed_price,
     pt.ecommerce_float_price AS price,
     pt.company_id,
-    pt.ecomerce_category_id AS category_id
+    pt.ecomerce_category_id AS category_id,
+	pt.average_rating AS "average_rating",
+	pt.description,
+	pt.total_reviews AS "total_review",
+	pt.product_variant_count_str AS "total_variants"
 FROM wishlist w
 INNER JOIN res_partner rp ON w.user_id = rp.id
 LEFT JOIN product_template pt ON w.product_id = pt.id
