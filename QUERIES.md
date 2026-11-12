@@ -1741,3 +1741,32 @@ WHERE c.parent_id IS NULL
   AND c.active = TRUE
   AND c.merchant IS NOT NULL;
 ```
+
+## Endpoint 30: Get driver transfer request 
+
+```sql
+
+SELECT
+    dtr.id,
+    dtr.name,
+    dtr.status,
+    CASE
+        WHEN ap.id IS NULL THEN NULL
+        ELSE json_build_object(
+            'id',    ap.id,
+            'name',  ap.name,
+            'phone', ap.phone
+        )
+    END AS assigned_driver
+FROM driver_transfer_request dtr
+JOIN res_users ru             ON ru.id = dtr.requesting_driver
+JOIN delivery_order del_order ON del_order.id = dtr.order_id
+LEFT JOIN res_users au        ON au.id = dtr.assigned_driver
+LEFT JOIN res_partner ap      ON ap.id = au.partner_id
+WHERE ru.token = %(x_token)s
+  AND del_order.id = %(order_id)s
+  AND del_order.state = 'picked'
+  AND ru.token_expiration_time > now();
+
+
+```
