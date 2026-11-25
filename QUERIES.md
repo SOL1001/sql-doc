@@ -987,6 +987,17 @@ WHERE c.cps_enabled = TRUE
 #### **Step 2: Fetch Paginated Products (Keyset Pagination)**
 Pulls products using indexed fields with dynamic keyset bounds:
 ```sql
+WITH RECURSIVE category_tree AS (
+    SELECT id
+    FROM product_ecomerce_categories
+    WHERE id = $category_id
+
+    UNION  -- UNION (not ALL) guards against cycles in bad data
+
+    SELECT c.id
+    FROM product_ecomerce_categories c
+    INNER JOIN category_tree ct ON c.parent_id = ct.id
+)
 SELECT
     pt.id,
     pt.name ->> 'en_US' AS name,
@@ -1008,28 +1019,23 @@ WHERE pt.active = TRUE
   AND pt.is_in_stock = TRUE
   AND pt.x_superapp_approval_status = 'approved'
   AND pt.company_id = ANY($1)
-  -- Dynamic Filters (appended when set):
-  -- AND pt.ecomerce_category_id = $category_id
+  -- Category filter (replaces the old equality check):
+  AND pt.ecomerce_category_id IN (SELECT id FROM category_tree)
+  -- Other dynamic filters (appended when set):
   -- AND pt.ecommerce_float_price >= $min_price
   -- AND pt.ecommerce_float_price <= $max_price
   -- AND COALESCE(pt.t_is_featured, FALSE) = $featured
   -- AND COALESCE(pt.is_halal, FALSE) = $halal
   -- AND COALESCE(pt.is_arrival, FALSE) = $arrival
 
-  -- Dynamic Keyset Ordering:
-  -- Mode id_desc (default):
-  --   AND pt.id < $cursor_id
-  --   ORDER BY pt.id DESC
-
-  -- Mode price_desc:
-  --   AND (pt.ecommerce_float_price < $cursor_price OR (pt.ecommerce_float_price = $cursor_price AND pt.id < $cursor_id))
-  --   ORDER BY pt.ecommerce_float_price DESC, pt.id DESC
-
-  -- Mode price_asc:
-  --   AND (pt.ecommerce_float_price > $cursor_price OR (pt.ecommerce_float_price = $cursor_price AND pt.id < $cursor_id))
-  --   ORDER BY pt.ecommerce_float_price ASC, pt.id DESC
+  -- Dynamic keyset ordering (unchanged):
+  -- id_desc:    AND pt.id < $cursor_id
+  --             ORDER BY pt.id DESC
+  -- price_desc: AND (pt.ecommerce_float_price < $cursor_price OR (pt.ecommerce_float_price = $cursor_price AND pt.id < $cursor_id))
+  --             ORDER BY pt.ecommerce_float_price DESC, pt.id DESC
+  -- price_asc:  AND (pt.ecommerce_float_price > $cursor_price OR (pt.ecommerce_float_price = $cursor_price AND pt.id < $cursor_id))
+  --             ORDER BY pt.ecommerce_float_price ASC, pt.id DESC
 LIMIT $limit;
-
 ```
 
 #### **Step 3A: Batch Hydrate Direct Product Discounts**
